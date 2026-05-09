@@ -10,6 +10,10 @@ const envSchema = z.object({
   OPENAI_EMBED_MODEL: z.string().default("text-embedding-3-small"),
   PORT: z.coerce.number().int().positive().default(3000),
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  COOKIE_SECURE: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === "true")),
 });
 
 export type Env = z.infer<typeof envSchema>;

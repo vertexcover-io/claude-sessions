@@ -136,6 +136,70 @@ describe("POST /api/auth/logout", () => {
   });
 });
 
+describe("POST /api/auth/cli-code + /api/auth/cli-exchange", () => {
+  it("issues a code that exchanges for a cli-scoped bearer token", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, { email: "pair@example.test" });
+    const codeRes = await app.request("/api/auth/cli-code", {
+      method: "POST",
+      headers: { authorization: `Bearer ${seed.token}` },
+    });
+    expect(codeRes.status).toBe(200);
+    const codeJson = (await codeRes.json()) as { code: string };
+    expect(codeJson.code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+
+    const exchangeRes = await app.request("/api/auth/cli-exchange", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: codeJson.code }),
+    });
+    expect(exchangeRes.status).toBe(200);
+    const exchangeJson = (await exchangeRes.json()) as {
+      token: string;
+      user: { id: string; email: string };
+    };
+    expect(exchangeJson.user.email).toBe("pair@example.test");
+    const { verifyToken } = await import("../src/auth/jwt.js");
+    const payload = await verifyToken(exchangeJson.token, env.JWT_SECRET);
+    expect(payload.aud).toBe("cli");
+    expect(payload.sub).toBe(seed.user.id);
+  });
+
+  it("rejects unknown codes", async () => {
+    const res = await app.request("/api/auth/cli-exchange", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "AAAA-BBBB" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("a code is single-use", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, { email: "single@example.test" });
+    const codeRes = await app.request("/api/auth/cli-code", {
+      method: "POST",
+      headers: { authorization: `Bearer ${seed.token}` },
+    });
+    const { code } = (await codeRes.json()) as { code: string };
+    const first = await app.request("/api/auth/cli-exchange", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    expect(first.status).toBe(200);
+    const second = await app.request("/api/auth/cli-exchange", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    expect(second.status).toBe(401);
+  });
+
+  it("requires auth to mint a code", async () => {
+    const res = await app.request("/api/auth/cli-code", { method: "POST" });
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("POST /api/auth/mcp-token (REQ-047)", () => {
   it("returns a fresh JWT with audience=mcp scoped to the user", async () => {
     const seed = await seedUser(db.db, env.JWT_SECRET, { email: "mcp-token@example.test" });
