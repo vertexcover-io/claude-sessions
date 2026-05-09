@@ -11,7 +11,13 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "typecheck": "turbo run typecheck",
-    "db:migrate": "turbo run db:migrate"
+    "db:migrate": "turbo run db:migrate",
+    "stack:up": "docker compose up -d --build",
+    "stack:down": "docker compose down",
+    "stack:logs": "docker compose logs -f api",
+    "stack:rebuild": "docker compose build api && docker compose up -d",
+    "stack:dev": "CLAUDE_SESSIONS_DEV=1 docker compose up -d --build",
+    "watch": "turbo run watch --parallel"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

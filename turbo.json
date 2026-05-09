@@ -18,6 +18,11 @@
       "cache": false,
       "persistent": true
     },
+    "watch": {
+      "cache": false,
+      "persistent": true,
+      "dependsOn": ["^build"]
+    },
     "db:migrate": {
       "cache": false,
       "env": ["DATABASE_URL", "JWT_SECRET", "EMBED_PROVIDER", "OPENAI_API_KEY"]
