@@ -88,11 +88,19 @@ export interface SummaryEvent extends CanonicalEventBase {
  * errors, and forward-compat `unknown` events from future Claude Code
  * versions (REQ-004). Storing rather than dropping these preserves
  * lossless replay.
+ *
+ * `data` carries the structured payload that doesn't fit `content` — e.g.
+ * the nested `attachment` object for attachment lines, or the sibling
+ * fields on `system` lines (`durationMs`, `hookInfos`, `hookErrors`,
+ * `messageCount`). The CLI forwards this through to the server so the
+ * web UI can surface harness signals (hook denials, task reminders,
+ * edited-file diffs) without depending on the raw blob.
  */
 export interface SystemEvent extends CanonicalEventBase {
   type: "system";
   kind: string;
   content: string;
+  data?: Record<string, unknown>;
 }
 
 export type CanonicalEvent =
