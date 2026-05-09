@@ -81,7 +81,45 @@ export interface TranscriptEvent {
     output_summary?: string;
     is_error?: boolean;
     kind?: string;
+    data?: Record<string, unknown>;
+    /** Synthetic field set by the conversation-mode collapse — every
+     *  assistant turn that was merged into this bubble, in order. The
+     *  UI renders each as its own block with its own timestamp. */
+    turns?: Array<{ ts: string; content_md: string }>;
+    model?: string;
   };
+}
+
+export interface SessionCommit {
+  sha: string;
+  short_sha: string;
+  author_name: string;
+  author_email: string;
+  authored_at: string;
+  subject: string;
+  branch: string | null;
+  files_changed: number | null;
+  insertions: number | null;
+  deletions: number | null;
+}
+
+export interface SearchFacets {
+  repos: Array<{ canonical_url: string; display_name: string | null }>;
+  branches: string[];
+  models: string[];
+  agents: string[];
+  tags: string[];
+}
+
+export interface ToolCallPair {
+  tool_use_id: string;
+  tool: string | null;
+  input_summary: string | null;
+  output_summary: string | null;
+  is_error: boolean;
+  called_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
 }
 
 export interface SearchResult {

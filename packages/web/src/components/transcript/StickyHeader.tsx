@@ -43,7 +43,15 @@ export const StickyHeader = ({ session }: Props) => {
           <Sparkles size={14} />
           {session.model ?? "-"}
         </span>
-        <span data-testid="hdr-duration" className="font-mono inline-flex items-center gap-1">
+        <span
+          data-testid="hdr-duration"
+          className="font-mono inline-flex items-center gap-1"
+          title={
+            session.started_at && session.ended_at
+              ? `${new Date(session.started_at).toLocaleString()} → ${new Date(session.ended_at).toLocaleString()}`
+              : undefined
+          }
+        >
           <Clock size={14} />
           {session.started_at && session.ended_at
             ? formatDuration(session.started_at, session.ended_at)

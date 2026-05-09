@@ -7,10 +7,13 @@ export const formatDuration = (startedAt: string, endedAt: string): string => {
   const start = new Date(startedAt).getTime();
   const end = new Date(endedAt).getTime();
   const seconds = Math.max(0, Math.round((end - start) / 1000));
-  const m = Math.floor(seconds / 60);
+  if (seconds < 60) return `${seconds}s`;
+  const totalMinutes = Math.floor(seconds / 60);
   const s = seconds % 60;
-  if (m === 0) return `${s}s`;
-  return `${m}m ${s.toString().padStart(2, "0")}s`;
+  if (totalMinutes < 60) return `${totalMinutes}m ${s.toString().padStart(2, "0")}s`;
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  return `${h}h ${m.toString().padStart(2, "0")}m ${s.toString().padStart(2, "0")}s`;
 };
 
 export const formatCost = (raw: string | number | null | undefined): string => {

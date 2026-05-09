@@ -8,9 +8,10 @@ import { useRepoSessions } from "../lib/api";
 import { formatRepo } from "../lib/cn";
 
 export const RepoView = () => {
-  const { canonical } = useParams<{ canonical: string }>();
-  const decoded = canonical ? decodeURIComponent(canonical) : "";
-  const sessions = useRepoSessions(decoded);
+  const params = useParams();
+  const canonical = params["*"] ?? "";
+  const sessions = useRepoSessions(canonical);
+  const decoded = canonical;
 
   return (
     <div className="max-w-5xl mx-auto p-4">

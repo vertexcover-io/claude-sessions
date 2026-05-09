@@ -3,9 +3,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   RepoSummary,
+  SearchFacets,
   SearchResult,
+  SessionCommit,
   SessionDetail,
   SessionListItem,
+  ToolCallPair,
   TranscriptEvent,
   User,
 } from "./types";
@@ -89,6 +92,16 @@ export const useMe = () =>
     refetchOnWindowFocus: false,
   });
 
+export interface CliCodeResponse {
+  code: string;
+  expiresInSeconds: number;
+}
+
+export const useCliCode = () =>
+  useMutation({
+    mutationFn: () => apiFetch<CliCodeResponse>("/api/auth/cli-code", { method: "POST" }),
+  });
+
 // ----- Repos --------------------------------------------------------------
 
 export const useEnabledRepos = () =>
@@ -142,6 +155,20 @@ export const useSessionEvents = (id: string | undefined) =>
     queryFn: () => apiFetch<{ events: TranscriptEvent[] }>(`/api/sessions/${id}/events`),
   });
 
+export const useSessionToolCalls = (id: string | undefined) =>
+  useQuery({
+    queryKey: ["session-tool-calls", id],
+    enabled: !!id,
+    queryFn: () => apiFetch<{ tool_calls: ToolCallPair[] }>(`/api/sessions/${id}/tool-calls`),
+  });
+
+export const useSessionCommits = (id: string | undefined) =>
+  useQuery({
+    queryKey: ["session-commits", id],
+    enabled: !!id,
+    queryFn: () => apiFetch<{ commits: SessionCommit[] }>(`/api/sessions/${id}/commits`),
+  });
+
 // ----- Search -------------------------------------------------------------
 
 export interface SearchFilters {
@@ -149,26 +176,46 @@ export interface SearchFilters {
   repo?: string;
   branch?: string;
   agent?: string;
+  model?: string;
   has_pr?: boolean;
   since?: string;
   limit?: number;
   tag?: string;
 }
 
+export const useSearchFacets = () =>
+  useQuery({
+    queryKey: ["search-facets"],
+    queryFn: () => apiFetch<SearchFacets>("/api/search/facets"),
+  });
+
 export const useSearch = (filters: SearchFilters | null) =>
   useQuery({
     queryKey: ["search", filters],
-    enabled: !!filters && filters.q.trim().length > 0,
+    // Run as long as the caller provided a filters object — empty `q` is
+    // valid and triggers the server's recency-ordered listing path.
+    enabled: !!filters,
     queryFn: () => {
       const qs = new URLSearchParams();
-      if (!filters) return Promise.resolve({ results: [], strategy: "rrf" as const });
-      qs.set("q", filters.q);
+      if (!filters) {
+        return Promise.resolve({
+          results: [] as SearchResult[],
+          strategy: "rrf" as "rrf" | "recency",
+        });
+      }
+      // Only set `q` when non-empty — keeps the URL clean and avoids
+      // sending an empty-string query.
+      if (filters.q && filters.q.length > 0) qs.set("q", filters.q);
       if (filters.repo) qs.set("repo", filters.repo);
       if (filters.branch) qs.set("branch", filters.branch);
       if (filters.agent) qs.set("agent", filters.agent);
+      if (filters.model) qs.set("model", filters.model);
+      if (filters.tag) qs.set("tag", filters.tag);
       if (filters.has_pr !== undefined) qs.set("has_pr", String(filters.has_pr));
       if (filters.since) qs.set("since", filters.since);
       if (filters.limit) qs.set("limit", String(filters.limit));
-      return apiFetch<{ results: SearchResult[]; strategy: "rrf" }>(`/api/search?${qs.toString()}`);
+      return apiFetch<{ results: SearchResult[]; strategy: "rrf" | "recency" }>(
+        `/api/search?${qs.toString()}`,
+      );
     },
   });

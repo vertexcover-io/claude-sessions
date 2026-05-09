@@ -22,7 +22,7 @@ const formatRelative = (iso: string | null): string => {
 export const RepoTile = ({ repo }: { repo: RepoSummary }) => {
   return (
     <Link
-      to={`/repos/${encodeURIComponent(repo.canonical_url)}`}
+      to={`/repos/${repo.canonical_url}`}
       className="repo-tile block p-4 rounded-lg border border-border bg-card hover:bg-muted transition-colors"
       data-testid="repo-tile"
     >

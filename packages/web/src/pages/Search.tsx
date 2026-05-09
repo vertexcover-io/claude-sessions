@@ -3,26 +3,48 @@
 import { Search } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { FilterChips } from "../components/FilterChips";
+import { SearchFilters } from "../components/SearchFilters";
 import { useSearch } from "../lib/api";
 import { formatCost, formatRepo } from "../lib/cn";
 
+const FILTER_KEYS = ["repo", "branch", "agent", "model", "tag", "has_pr", "since"] as const;
+
+const formatDate = (iso: string): string => {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  return new Date(ms).toLocaleDateString([], { day: "2-digit", month: "short", year: "numeric" });
+};
+
 export const SearchPage = () => {
   const [params, setParams] = useSearchParams();
-  const initialQ = params.get("q") ?? params.get("tag") ?? "";
+  const initialQ = params.get("q") ?? "";
   const [query, setQuery] = useState(initialQ);
 
+  // Re-seed the input when the URL `q` changes externally (back/forward,
+  // home redirect, etc.). Don't read from the deprecated `tag` param.
   useEffect(() => {
-    setQuery(params.get("q") ?? params.get("tag") ?? "");
+    setQuery(params.get("q") ?? "");
   }, [params]);
 
+  const activeFilters = FILTER_KEYS.map((k) => params.get(k)).filter(
+    (v): v is string => v !== null && v !== "",
+  );
+  const hasAnyFilter = activeFilters.length > 0;
+  const trimmedQuery = query.trim();
+
+  // Fire a search when the user has typed a query OR any filter is set.
+  // The `useSearch` queryKey memoizes on the whole filters object, so
+  // changing a filter or typing in the box auto-refires.
   const filters =
-    query.trim().length > 0
+    trimmedQuery.length > 0 || hasAnyFilter
       ? {
-          q: query,
+          q: trimmedQuery,
           repo: params.get("repo") ?? undefined,
           branch: params.get("branch") ?? undefined,
           agent: params.get("agent") ?? undefined,
+          model: params.get("model") ?? undefined,
+          tag: params.get("tag") ?? undefined,
+          since: params.get("since") ?? undefined,
           has_pr:
             params.get("has_pr") === "true"
               ? true
@@ -37,13 +59,17 @@ export const SearchPage = () => {
   const onSubmit = (e: FormEvent) => {
     e.preventDefault();
     const next = new URLSearchParams(params);
-    next.set("q", query);
-    next.delete("tag");
+    if (trimmedQuery) next.set("q", trimmedQuery);
+    else next.delete("q");
     setParams(next, { replace: true });
   };
 
+  const isLoading = search.isFetching && !!filters;
+  const results = search.data?.results ?? [];
+  const showLandingPrompt = !filters && !search.isFetching;
+
   return (
-    <div className="max-w-3xl mx-auto p-4">
+    <div className="max-w-4xl mx-auto p-4 space-y-3">
       <form onSubmit={onSubmit} className="flex items-center gap-2">
         <Search size={16} className="text-muted-foreground" />
         <input
@@ -57,23 +83,33 @@ export const SearchPage = () => {
         </button>
       </form>
 
-      <div className="mt-3">
-        <FilterChips />
-      </div>
+      <SearchFilters />
 
-      <div className="mt-4 space-y-3" data-testid="search-results">
-        {!filters && (
+      <div className="space-y-3" data-testid="search-results">
+        {showLandingPrompt && (
           <div className="text-sm text-muted-foreground">
-            Type a query to search across all your sessions.
+            Type a query, pick a filter, or both — sessions are listed by recency when you haven't
+            typed a query.
           </div>
         )}
-        {search.isLoading && filters && (
-          <div className="text-sm text-muted-foreground">Searching…</div>
+
+        {filters && (
+          <div className="flex items-center justify-between text-xs text-muted-foreground tabular-nums">
+            <span>
+              {isLoading
+                ? "Searching…"
+                : results.length === 0
+                  ? "No results."
+                  : `${results.length} result${results.length === 1 ? "" : "s"}`}
+              {!isLoading && search.data?.strategy === "recency" && results.length > 0 && (
+                <span className="ml-2 text-muted-foreground/80">(by recency)</span>
+              )}
+            </span>
+            {search.isError && <span className="text-red-500">Search failed.</span>}
+          </div>
         )}
-        {search.data && search.data.results.length === 0 && (
-          <div className="text-sm text-muted-foreground">No results.</div>
-        )}
-        {search.data?.results.map((r) => (
+
+        {results.map((r) => (
           <Link
             key={r.session_id}
             to={`/sessions/${r.session_id}`}
@@ -94,7 +130,25 @@ export const SearchPage = () => {
               <span>{formatRepo(r.repo)}</span>
               {r.branch && <span className="font-mono">{r.branch}</span>}
               {r.agent && <span className="font-mono">{r.agent}</span>}
+              {r.started_at && (
+                <span className="font-mono ml-auto">{formatDate(r.started_at)}</span>
+              )}
             </div>
+            {r.tags && r.tags.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {r.tags.slice(0, 6).map((t) => (
+                  <span
+                    key={t}
+                    className="text-[11px] px-1.5 py-0.5 rounded border border-border bg-muted text-muted-foreground"
+                  >
+                    {t}
+                  </span>
+                ))}
+                {r.tags.length > 6 && (
+                  <span className="text-[11px] text-muted-foreground">+{r.tags.length - 6}</span>
+                )}
+              </div>
+            )}
           </Link>
         ))}
       </div>

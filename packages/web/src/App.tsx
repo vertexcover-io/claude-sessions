@@ -60,7 +60,7 @@ export const App = () => {
               }
             />
             <Route
-              path="/repos/:canonical"
+              path="/repos/*"
               element={
                 <RequireAuth>
                   <RepoView />
