@@ -1,5 +1,6 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
+import { unlinkSync } from "node:fs";
 import { atomicWriteJson, readJsonOr, withFileLock } from "./atomic.js";
 import { credentialsPath } from "./paths.js";
 
@@ -28,4 +29,12 @@ export const requireCredentials = (): Credentials => {
     throw new Error("not logged in — run `claude-sessions login` first");
   }
   return c;
+};
+
+export const clearCredentials = (): void => {
+  try {
+    unlinkSync(credentialsPath());
+  } catch {
+    // ignore
+  }
 };

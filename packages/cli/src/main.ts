@@ -7,7 +7,10 @@ import { disableCommand } from "./commands/disable.js";
 import { enableCommand } from "./commands/enable.js";
 import { findCommand } from "./commands/find.js";
 import { forkCommand } from "./commands/fork.js";
+import { initCommand } from "./commands/init.js";
 import { loginCommand } from "./commands/login.js";
+import { logoutCommand } from "./commands/logout.js";
+import { logsCommand } from "./commands/logs.js";
 import { mcpCommand } from "./commands/mcp.js";
 import { nameCommand } from "./commands/name.js";
 import { openCommand } from "./commands/open.js";
@@ -15,11 +18,6 @@ import { statusCommand } from "./commands/status.js";
 import { syncCommand } from "./commands/sync.js";
 import { watchCommand } from "./commands/watch.js";
 
-/**
- * CLI entry — wires commander to per-subcommand handlers. Subcommands
- * deliberately don't import each other directly; this file is the single
- * coupling point between argv and business logic.
- */
 const main = async (): Promise<void> => {
   const program = new Command();
   program
@@ -28,23 +26,47 @@ const main = async (): Promise<void> => {
     .version("0.0.0");
 
   program
+    .command("init")
+    .description("Ensure the CLI is authenticated and the watcher daemon is running.")
+    .option("--server <url>", "server URL", "http://localhost:3000")
+    .action(async (opts: { server: string }) => {
+      const code = await initCommand({ serverUrl: opts.server });
+      process.exit(code);
+    });
+
+  program
     .command("login")
-    .description("Log in to a claude-sessions server and persist the token.")
-    .requiredOption("--server <url>", "server URL", "http://localhost:3000")
-    .requiredOption("--email <email>", "email")
-    .requiredOption("--password <password>", "password")
-    .action(async (opts: { server: string; email: string; password: string }) => {
-      const code = await loginCommand({
-        serverUrl: opts.server,
-        email: opts.email,
-        password: opts.password,
+    .description("Authenticate via the dashboard and pair the CLI.")
+    .option("--server <url>", "server URL", "http://localhost:3000")
+    .action(async (opts: { server: string }) => {
+      const code = await loginCommand({ serverUrl: opts.server });
+      process.exit(code);
+    });
+
+  program
+    .command("logout")
+    .description("Stop the watcher and clear stored credentials.")
+    .action(async () => {
+      const code = await logoutCommand();
+      process.exit(code);
+    });
+
+  program
+    .command("logs")
+    .description("Show recent watcher logs.")
+    .option("-f, --follow", "stream new log lines as they arrive", false)
+    .option("-n, --lines <n>", "number of lines to show", "200")
+    .action(async (opts: { follow: boolean; lines: string }) => {
+      const code = await logsCommand({
+        follow: opts.follow,
+        lines: Number.parseInt(opts.lines, 10) || 200,
       });
       process.exit(code);
     });
 
   program
     .command("enable [path]")
-    .description("Enable a repo for sync (defaults to cwd).")
+    .description("Watch the repo at <path> (defaults to cwd).")
     .action(async (path?: string) => {
       const client = buildClient();
       const code = await enableCommand({
@@ -56,7 +78,7 @@ const main = async (): Promise<void> => {
 
   program
     .command("disable [path]")
-    .description("Disable a repo for sync (defaults to cwd).")
+    .description("Stop watching a repo (defaults to cwd).")
     .option("--purge", "delete all events for this repo from the cloud", false)
     .action(async (path: string | undefined, opts: { purge: boolean }) => {
       const client = buildClient();
@@ -70,7 +92,7 @@ const main = async (): Promise<void> => {
 
   program
     .command("status")
-    .description("Show enabled repos + last-sync timestamps.")
+    .description("Show watched repos + last-sync timestamps.")
     .action(() => {
       const r = statusCommand();
       process.exit(r.exit);
@@ -78,10 +100,11 @@ const main = async (): Promise<void> => {
 
   program
     .command("sync")
-    .description("One-shot catch-up: ingest any pending events for enabled repos.")
-    .action(async () => {
+    .description("One-shot catch-up: ingest any pending events for watched repos.")
+    .option("--full-scan", "Re-read every JSONL from byte 0 (server dedupes by event_uuid)")
+    .action(async (opts: { fullScan?: boolean }) => {
       const client = buildClient();
-      const code = await syncCommand({ client });
+      const code = await syncCommand({ client, fullScan: opts.fullScan === true });
       process.exit(code);
     });
 

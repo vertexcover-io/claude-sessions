@@ -1,44 +1,37 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { writeCredentials } from "../config/credentials.js";
+import { ensureAuthenticated, runPairFlow } from "./_pair.js";
 
 export interface LoginOptions {
-  serverUrl: string;
-  email: string;
-  password: string;
-  /** Override fetch for tests. */
+  serverUrl?: string;
+  open?: import("./_open.js").Opener;
+  stdin?: NodeJS.ReadableStream;
+  stdout?: NodeJS.WritableStream;
   fetchImpl?: typeof fetch;
 }
 
-/**
- * `claude-sessions login` — POST /api/auth/login, persist the bearer token.
- *
- * Returns 0 on success, non-zero on auth failure with a clear stderr line
- * (REQ-030, REQ-031). Token is written to `~/.claude-sessions/credentials.json`
- * with mode `0600` so other users on the box can't read it.
- */
-export const loginCommand = async (opts: LoginOptions): Promise<number> => {
-  const fetchImpl = opts.fetchImpl ?? fetch;
-  const url = `${opts.serverUrl.replace(/\/+$/, "")}/api/auth/login`;
-  const res = await fetchImpl(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: opts.email, password: opts.password }),
+const DEFAULT_SERVER_URL = "http://localhost:3000";
+
+export const loginCommand = async (opts: LoginOptions = {}): Promise<number> => {
+  const serverUrl = (opts.serverUrl ?? DEFAULT_SERVER_URL).replace(/\/+$/, "");
+
+  const existing = await ensureAuthenticated({
+    serverUrl,
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
   });
-  if (!res.ok) {
-    process.stderr.write("invalid email or password\n");
-    return 1;
+  if (existing) {
+    process.stdout.write(
+      `already logged in as ${existing.email}. run \`claude-sessions logout\` first to switch.\n`,
+    );
+    return 0;
   }
-  const body = (await res.json()) as { token?: string; user?: { email?: string } };
-  if (!body.token) {
-    process.stderr.write("login response missing token\n");
-    return 1;
-  }
-  await writeCredentials({
-    server_url: opts.serverUrl,
-    token: body.token,
-    user_email: body.user?.email ?? opts.email,
+
+  const result = await runPairFlow({
+    serverUrl,
+    ...(opts.open ? { open: opts.open } : {}),
+    ...(opts.stdin ? { stdin: opts.stdin } : {}),
+    ...(opts.stdout ? { stdout: opts.stdout } : {}),
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
   });
-  process.stdout.write(`logged in as ${body.user?.email ?? opts.email}\n`);
-  return 0;
+  return result ? 0 : 1;
 };
