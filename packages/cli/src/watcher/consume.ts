@@ -6,6 +6,7 @@ import { type CanonicalEvent, redact } from "@claude-sessions/core";
 import { listRepos } from "../config/repos.js";
 import { getFileState, setFileState } from "../config/state.js";
 import { readSessionMeta } from "../discover.js";
+import { listCommitsInWindow } from "../git-commits.js";
 import type { IngestEvent, IngestPayload, UploadClient } from "../upload/client.js";
 import { isSessionMarkedPrivate } from "./privacy.js";
 
@@ -27,12 +28,46 @@ const redactDeep = (value: unknown): unknown => {
   return value;
 };
 
+/**
+ * Canonical projection: the fields the web UI / search reads off `payload`.
+ * We deliberately strip `raw` here — the original line is preserved in the
+ * session blob upload, so there's no value in shipping it twice.
+ */
+const canonicalPayload = (ev: CanonicalEvent): Record<string, unknown> => {
+  switch (ev.type) {
+    case "user_msg":
+      return { content_md: ev.content_md };
+    case "assistant_msg":
+      return {
+        content_md: ev.content_md,
+        ...(ev.model !== undefined ? { model: ev.model } : {}),
+        ...(ev.usage !== undefined ? { usage: ev.usage } : {}),
+      };
+    case "tool_use":
+      return {
+        tool: ev.tool,
+        tool_use_id: ev.tool_use_id,
+        input_summary: ev.input_summary,
+        ...(ev.output_summary !== undefined ? { output_summary: ev.output_summary } : {}),
+        ...(ev.is_error !== undefined ? { is_error: ev.is_error } : {}),
+      };
+    case "summary":
+      return { content: ev.content };
+    case "system":
+      return {
+        kind: ev.kind,
+        content: ev.content,
+        ...(ev.data !== undefined ? { data: ev.data } : {}),
+      };
+  }
+};
+
 const toIngestEvent = (ev: CanonicalEvent): IngestEvent => ({
   event_uuid: ev.event_uuid,
   parent_uuid: ev.parent_uuid,
   ts: ev.ts,
   type: ev.type,
-  payload: redactDeep(ev.raw),
+  payload: redactDeep(canonicalPayload(ev)),
 });
 
 export interface ConsumeOptions {
@@ -48,18 +83,43 @@ export interface ConsumeResult {
   reason?: string;
 }
 
+/** Treat 1970-01-01 (epoch) as a sentinel for "no real timestamp". The
+ *  adapter falls back to epoch on records that lack a `timestamp` field
+ *  (e.g. the `last-prompt` / `permission-mode` meta records that newer
+ *  Claude Code transcripts prepend), so we can't trust the first/last
+ *  event blindly when computing session bounds. */
+const isRealTs = (s: string | undefined): s is string => {
+  if (!s) return false;
+  const ms = Date.parse(s);
+  return Number.isFinite(ms) && ms > 0;
+};
+
 const buildSessionPayload = (
   sessionId: string,
   cwd: string,
   events: CanonicalEvent[],
   canonicalUrl: string,
 ): IngestPayload => {
-  const ts0 = events[0]?.ts ?? new Date().toISOString();
-  const tsN = events[events.length - 1]?.ts ?? ts0;
+  const fallback = new Date().toISOString();
+  const ts0 = events.find((e) => isRealTs(e.ts))?.ts ?? fallback;
+  let tsN = ts0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev && isRealTs(ev.ts)) {
+      tsN = ev.ts;
+      break;
+    }
+  }
   let model: string | null = null;
   let inTokens = 0;
   let outTokens = 0;
+  let branch: string | null = null;
   for (const ev of events) {
+    // gitBranch lives on raw — not lifted onto canonical, so peek there.
+    const raw = ev.raw as Record<string, unknown> | null | undefined;
+    if (raw && typeof raw.gitBranch === "string" && raw.gitBranch.length > 0) {
+      branch = raw.gitBranch;
+    }
     if (ev.type === "assistant_msg") {
       if (ev.model) model = ev.model;
       if (ev.usage) {
@@ -73,7 +133,7 @@ const buildSessionPayload = (
       id: sessionId,
       agent: "claude-code",
       agent_version: "1.0.0",
-      repo: { canonical_url: canonicalUrl, branch: null },
+      repo: { canonical_url: canonicalUrl, branch },
       source_cwd_hint: cwd,
       started_at: ts0,
       ended_at: tsN,
@@ -155,8 +215,18 @@ export const consumeFile = async (
   }
 
   const collected: CanonicalEvent[] = [];
+  // Dedupe defensively on event_uuid: server upserts on the composite
+  // (session_id, event_uuid) PK, and Postgres errors on duplicate rows
+  // within a single ON CONFLICT statement. Last-write-wins.
+  const seen = new Map<string, number>();
   for await (const ev of streamEvents(path, { byteOffset: offset })) {
-    collected.push(ev);
+    const idx = seen.get(ev.event_uuid);
+    if (idx !== undefined) {
+      collected[idx] = ev;
+    } else {
+      seen.set(ev.event_uuid, collected.length);
+      collected.push(ev);
+    }
   }
   if (collected.length === 0) {
     await setFileState(path, {
@@ -169,10 +239,36 @@ export const consumeFile = async (
   }
 
   const sessionId = meta.session_id ?? collected[0]?.event_uuid ?? path;
-  const payload = buildSessionPayload(sessionId, meta.cwd, collected, repo.canonical_url);
+  const fullPayload = buildSessionPayload(sessionId, meta.cwd, collected, repo.canonical_url);
 
-  // Upload first; only on success do we persist the new offset.
-  await client.ingest(payload);
+  // Mine commits authored in the session window from the local repo. Best
+  // effort — if `git` is missing or the path isn't a repo, list returns
+  // empty and we just don't ship any commits.
+  let commits: NonNullable<IngestPayload["commits"]> | undefined;
+  try {
+    const c = listCommitsInWindow(
+      repo.entry.local_path,
+      fullPayload.session.started_at,
+      fullPayload.session.ended_at,
+    );
+    if (c.length > 0) commits = c;
+  } catch {
+    // ignore — commits are non-essential for ingest
+  }
+
+  // Server caps each ingest batch at 500 events. Split large batches; the
+  // server dedupes on event_uuid so retrying the whole window on a partial
+  // failure is safe (offset advances only after every chunk succeeds).
+  const CHUNK = 500;
+  for (let i = 0; i < fullPayload.events.length; i += CHUNK) {
+    const slice = fullPayload.events.slice(i, i + CHUNK);
+    const chunkPayload: IngestPayload = {
+      session: fullPayload.session,
+      events: slice,
+      ...(i === 0 && commits ? { commits } : {}),
+    };
+    await client.ingest(chunkPayload);
+  }
 
   const lastUuid = collected[collected.length - 1]?.event_uuid ?? null;
   await setFileState(path, {

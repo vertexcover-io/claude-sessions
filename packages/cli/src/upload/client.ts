@@ -33,9 +33,25 @@ export interface IngestEvent {
   payload: unknown;
 }
 
+export interface IngestCommit {
+  sha: string;
+  short_sha: string;
+  author_name: string;
+  author_email: string;
+  authored_at: string;
+  subject: string;
+  branch: string | null;
+  files_changed: number | null;
+  insertions: number | null;
+  deletions: number | null;
+}
+
 export interface IngestPayload {
   session: IngestSessionMeta;
   events: IngestEvent[];
+  /** Commits authored on the local repo during the session window.
+   *  Optional — sent only on the first batch of a session. */
+  commits?: IngestCommit[];
 }
 
 export interface UploadClientOptions {

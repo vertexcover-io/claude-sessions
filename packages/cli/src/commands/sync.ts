@@ -7,6 +7,7 @@ import { consumeFile } from "../watcher/consume.js";
 
 export interface SyncOptions {
   client: UploadClient;
+  fullScan?: boolean;
 }
 
 /**
@@ -21,7 +22,7 @@ export const syncCommand = async (opts: SyncOptions): Promise<number> => {
     const files = findSessionsForRepo(r.canonical_url, [r.entry.local_path]);
     for (const f of files) {
       try {
-        const result = await consumeFile(f.path, opts.client);
+        const result = await consumeFile(f.path, opts.client, { fullScan: opts.fullScan });
         total += result.uploaded;
       } catch (err) {
         process.stderr.write(`sync failed for ${f.path}: ${(err as Error).message}\n`);

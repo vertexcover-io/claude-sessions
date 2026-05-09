@@ -232,6 +232,171 @@ describe("mid-session enable (EDGE-009)", () => {
   });
 });
 
+describe("ingest chunking (server cap is 500/batch)", () => {
+  it("a single 1200-event JSONL is split into 3 ingest POSTs of <=500 each", async () => {
+    const repo = makeTempGitRepo("git@github.com:fixture/chunking.git");
+    try {
+      const sid = "session-chunked-1";
+      const events = Array.from({ length: 1200 }, (_, i) =>
+        buildEvent({
+          uuid: `c${i}`,
+          sessionId: sid,
+          cwd: repo.path,
+          type: i % 2 === 0 ? "user" : "assistant",
+        }),
+      );
+      createSessionFile(fixture.projectsRoot, repo.path, sid, events);
+      await enableCommand({ path: repo.path, client: buildClient() });
+      const calls = ingestCalls() as Array<{ events: unknown[]; commits?: unknown[] }>;
+      expect(calls.length).toBe(3);
+      expect(calls[0]?.events.length).toBe(500);
+      expect(calls[1]?.events.length).toBe(500);
+      expect(calls[2]?.events.length).toBe(200);
+      // Commits ride only on the first chunk (so the server doesn't receive
+      // them three times). Other chunks may omit the field entirely.
+      expect(calls[1]?.commits ?? undefined).toBeUndefined();
+      expect(calls[2]?.commits ?? undefined).toBeUndefined();
+    } finally {
+      repo.cleanup();
+    }
+  });
+});
+
+describe("ingest payload is canonical, not raw", () => {
+  it("user_msg/assistant_msg/tool_use payloads carry only canonical projection fields", async () => {
+    const repo = makeTempGitRepo("git@github.com:fixture/payload-shape.git");
+    try {
+      const sid = "session-shape-1";
+      const ts = "2026-05-09T10:00:00.000Z";
+      // user prompt
+      const ev1 = buildEvent({ uuid: "s1", sessionId: sid, cwd: repo.path, ts, text: "hi" });
+      // assistant text + tool_use in one record
+      const ev2 = {
+        type: "assistant",
+        uuid: "s2",
+        parentUuid: "s1",
+        timestamp: ts,
+        sessionId: sid,
+        cwd: repo.path,
+        gitBranch: "main",
+        version: "1.0.0",
+        message: {
+          role: "assistant",
+          model: "claude-3-5-sonnet",
+          content: [
+            { type: "text", text: "running ls" },
+            { type: "tool_use", id: "t1", name: "Bash", input: { command: "ls -la" } },
+          ],
+          usage: { input_tokens: 7, output_tokens: 3 },
+        },
+      };
+      createSessionFile(fixture.projectsRoot, repo.path, sid, [ev1, ev2]);
+
+      await enableCommand({ path: repo.path, client: buildClient() });
+
+      const calls = ingestCalls();
+      expect(calls.length).toBe(1);
+      const payload = calls[0] as {
+        events: Array<{ type: string; payload: Record<string, unknown> }>;
+      };
+      const byType = Object.fromEntries(payload.events.map((e) => [e.type, e.payload]));
+
+      expect(byType.user_msg).toEqual({ content_md: "hi" });
+
+      expect(byType.assistant_msg).toMatchObject({
+        content_md: "running ls",
+        model: "claude-3-5-sonnet",
+        usage: { input_tokens: 7, output_tokens: 3 },
+      });
+      // No raw leak.
+      expect(byType.assistant_msg).not.toHaveProperty("message");
+      expect(byType.assistant_msg).not.toHaveProperty("uuid");
+
+      expect(byType.tool_use).toMatchObject({
+        tool: "Bash",
+        tool_use_id: "t1",
+        input_summary: "ls -la",
+      });
+      expect(byType.tool_use).not.toHaveProperty("message");
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it("system + attachment payloads forward structured `data` to the wire", async () => {
+    const repo = makeTempGitRepo("git@github.com:fixture/sys-data.git");
+    try {
+      const sid = "session-sys-1";
+      const ts = "2026-05-09T10:00:00.000Z";
+      const userEv = buildEvent({ uuid: "s1", sessionId: sid, cwd: repo.path, ts, text: "hi" });
+      const attachmentEv = {
+        type: "attachment",
+        uuid: "att1",
+        parentUuid: "s1",
+        timestamp: ts,
+        sessionId: sid,
+        cwd: repo.path,
+        attachment: {
+          type: "hook_success",
+          hookName: "SessionStart:startup",
+          exitCode: 0,
+          durationMs: 42,
+          stdout: "OK\n",
+        },
+      };
+      const turnDurationEv = {
+        type: "system",
+        uuid: "td1",
+        parentUuid: "s1",
+        timestamp: ts,
+        sessionId: sid,
+        subtype: "turn_duration",
+        durationMs: 8421,
+        messageCount: 12,
+      };
+      createSessionFile(fixture.projectsRoot, repo.path, sid, [
+        userEv,
+        attachmentEv,
+        turnDurationEv,
+      ]);
+
+      await enableCommand({ path: repo.path, client: buildClient() });
+
+      const calls = ingestCalls();
+      expect(calls.length).toBe(1);
+      const payload = calls[0] as {
+        events: Array<{
+          event_uuid: string;
+          type: string;
+          payload: Record<string, unknown>;
+        }>;
+      };
+      const byUuid = Object.fromEntries(payload.events.map((e) => [e.event_uuid, e]));
+
+      expect(byUuid.att1?.type).toBe("system");
+      expect(byUuid.att1?.payload).toMatchObject({
+        kind: "attachment.hook_success",
+        data: {
+          attachment: {
+            type: "hook_success",
+            hookName: "SessionStart:startup",
+            exitCode: 0,
+            durationMs: 42,
+          },
+        },
+      });
+
+      expect(byUuid.td1?.type).toBe("system");
+      expect(byUuid.td1?.payload).toMatchObject({
+        kind: "turn_duration",
+        data: { durationMs: 8421, messageCount: 12 },
+      });
+    } finally {
+      repo.cleanup();
+    }
+  });
+});
+
 // Touch unused imports for lint.
 void renameSync;
 void listRepos;

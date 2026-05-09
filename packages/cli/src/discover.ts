@@ -19,20 +19,42 @@ export const claudeProjectsRoot = (): string =>
  */
 const encodeCwd = (path: string): string => path.replace(/\//g, "-");
 
-const readFirstJsonLine = (path: string): Record<string, unknown> | null => {
+/**
+ * Read the first JSONL records from `path` until we find one that carries a
+ * string `cwd` field. Newer Claude Code transcripts prepend meta records
+ * (`last-prompt`, `permission-mode`, …) without `cwd`; the source-of-truth
+ * cwd lives a few lines in. We read up to 64 KiB and scan up to 32 records
+ * before giving up.
+ */
+const readSessionAnchorLine = (path: string): Record<string, unknown> | null => {
   try {
-    const buf = Buffer.alloc(8 * 1024);
+    const buf = Buffer.alloc(64 * 1024);
     const fd = openSync(path, "r");
+    let bytes: number;
     try {
-      const bytes = readSync(fd, buf, 0, buf.length, 0);
-      const text = buf.subarray(0, bytes).toString("utf8");
-      const newline = text.indexOf("\n");
-      const line = (newline === -1 ? text : text.slice(0, newline)).trim();
-      if (!line) return null;
-      return JSON.parse(line) as Record<string, unknown>;
+      bytes = readSync(fd, buf, 0, buf.length, 0);
     } finally {
       closeSync(fd);
     }
+    const text = buf.subarray(0, bytes).toString("utf8");
+    const lines = text.split("\n");
+    let firstParsed: Record<string, unknown> | null = null;
+    let scanned = 0;
+    for (const raw of lines) {
+      if (scanned >= 32) break;
+      const line = raw.trim();
+      if (!line) continue;
+      scanned += 1;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (firstParsed === null) firstParsed = parsed;
+      if (typeof parsed.cwd === "string") return parsed;
+    }
+    return firstParsed;
   } catch {
     return null;
   }
@@ -94,13 +116,13 @@ export const findSessionsForRepo = (
 
   const results: DiscoveredFile[] = [];
   for (const path of candidates) {
-    const first = readFirstJsonLine(path);
-    if (!first) continue;
-    const cwdRaw = first.cwd;
+    const anchor = readSessionAnchorLine(path);
+    if (!anchor) continue;
+    const cwdRaw = anchor.cwd;
     const cwd = typeof cwdRaw === "string" ? cwdRaw : null;
     if (!cwd) continue;
     if (!localPaths.includes(cwd)) continue;
-    const sidRaw = first.sessionId;
+    const sidRaw = anchor.sessionId;
     const session_id = typeof sidRaw === "string" ? sidRaw : null;
     results.push({ path, cwd, session_id });
   }
@@ -114,13 +136,13 @@ export const findSessionsForRepo = (
 export const readSessionMeta = (
   path: string,
 ): { session_id: string | null; cwd: string | null } => {
-  const first = readFirstJsonLine(path);
-  if (!first) return { session_id: null, cwd: null };
-  const cwdRaw = first.cwd;
+  const anchor = readSessionAnchorLine(path);
+  if (!anchor) return { session_id: null, cwd: null };
+  const cwdRaw = anchor.cwd;
   const cwd = typeof cwdRaw === "string" ? cwdRaw : null;
-  const sidRaw = first.sessionId;
+  const sidRaw = anchor.sessionId;
   const session_id = typeof sidRaw === "string" ? sidRaw : null;
   return { session_id, cwd };
 };
 
-export const _internal = { encodeCwd, readFirstJsonLine };
+export const _internal = { encodeCwd, readSessionAnchorLine };
