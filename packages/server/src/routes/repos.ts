@@ -37,7 +37,9 @@ export const buildReposRouter = (db: DbClient, env: Env): Hono<{ Variables: Auth
         displayName: repos.displayName,
         access: userRepos.access,
         sessionCount: sql<number>`coalesce(count(${sessions.id})::int, 0)`,
-        lastActivity: sql<Date | null>`max(${sessions.startedAt})`,
+        // postgres-js returns aggregate timestamps as ISO strings (not Date),
+        // even when the column type is timestamptz. Coerce to ISO at the edge.
+        lastActivity: sql<string | null>`max(${sessions.startedAt})`,
       })
       .from(userRepos)
       .innerJoin(repos, eq(repos.id, userRepos.repoId))
@@ -53,7 +55,7 @@ export const buildReposRouter = (db: DbClient, env: Env): Hono<{ Variables: Auth
         display_name: r.displayName,
         access: r.access,
         session_count: r.sessionCount ?? 0,
-        last_activity: r.lastActivity ? r.lastActivity.toISOString() : null,
+        last_activity: r.lastActivity ? new Date(r.lastActivity).toISOString() : null,
       })),
     });
   });

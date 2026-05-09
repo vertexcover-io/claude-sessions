@@ -1,12 +1,12 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { type AuthVariables, buildRequireAuth } from "../auth/middleware.js";
 import type { DbClient } from "../db/client.js";
 import { findUserRepoAccess, upsertRepo } from "../db/repos.js";
-import { events, sessions } from "../db/schema.js";
+import { events, sessionCommits, sessions } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { redactDeep } from "../redact.js";
 
@@ -16,6 +16,19 @@ const eventSchema = z.object({
   ts: z.string().datetime(),
   type: z.enum(["user_msg", "assistant_msg", "tool_use", "summary", "system"]),
   payload: z.unknown(),
+});
+
+const commitSchema = z.object({
+  sha: z.string().min(7),
+  short_sha: z.string().min(4),
+  author_name: z.string(),
+  author_email: z.string(),
+  authored_at: z.string().datetime(),
+  subject: z.string(),
+  branch: z.string().nullable(),
+  files_changed: z.number().int().nonnegative().nullable(),
+  insertions: z.number().int().nonnegative().nullable(),
+  deletions: z.number().int().nonnegative().nullable(),
 });
 
 const ingestSchema = z.object({
@@ -34,6 +47,7 @@ const ingestSchema = z.object({
     total_cost_usd: z.number().nonnegative(),
   }),
   events: z.array(eventSchema).max(500),
+  commits: z.array(commitSchema).max(500).optional(),
 });
 
 export const buildIngestRouter = (db: DbClient, env: Env): Hono<{ Variables: AuthVariables }> => {
@@ -90,6 +104,10 @@ export const buildIngestRouter = (db: DbClient, env: Env): Hono<{ Variables: Aut
 
       let inserted: { eventUuid: string }[] = [];
       if (redacted.length > 0) {
+        // Upsert on (session_id, event_uuid). On conflict we refresh the
+        // payload + ts so adapter improvements (new canonical fields,
+        // structured `data`, fixed timestamps) propagate on resync.
+        // Server still de-dupes within a single batch via the unique key.
         inserted = await tx
           .insert(events)
           .values(
@@ -102,12 +120,45 @@ export const buildIngestRouter = (db: DbClient, env: Env): Hono<{ Variables: Aut
               payload: e.payload as object,
             })),
           )
-          .onConflictDoNothing()
+          .onConflictDoUpdate({
+            target: [events.sessionId, events.eventUuid],
+            set: {
+              parentUuid: sql`excluded.parent_uuid`,
+              ts: sql`excluded.ts`,
+              type: sql`excluded.type`,
+              payload: sql`excluded.payload`,
+            },
+          })
           .returning({ eventUuid: events.eventUuid });
       }
+      // Replace any existing commits for this session with the freshly
+      // mined set so the CLI re-mining stays authoritative. Cheap because
+      // the count is bounded by the session window length.
+      let commitsAccepted = 0;
+      if (body.commits && body.commits.length > 0) {
+        await tx.delete(sessionCommits).where(eq(sessionCommits.sessionId, body.session.id));
+        await tx.insert(sessionCommits).values(
+          body.commits.map((c) => ({
+            sessionId: body.session.id,
+            sha: c.sha,
+            shortSha: c.short_sha,
+            authorName: c.author_name,
+            authorEmail: c.author_email,
+            authoredAt: new Date(c.authored_at),
+            subject: c.subject,
+            branch: c.branch,
+            filesChanged: c.files_changed,
+            insertions: c.insertions,
+            deletions: c.deletions,
+          })),
+        );
+        commitsAccepted = body.commits.length;
+      }
+
       return {
         accepted: inserted.length,
         skipped: redacted.length - inserted.length,
+        commits_accepted: commitsAccepted,
       };
     });
 
@@ -116,6 +167,7 @@ export const buildIngestRouter = (db: DbClient, env: Env): Hono<{ Variables: Aut
       session_id: body.session.id,
       accepted_events: result.accepted,
       skipped_duplicates: result.skipped,
+      commits_accepted: result.commits_accepted,
     });
   });
 

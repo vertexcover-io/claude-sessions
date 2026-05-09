@@ -19,6 +19,7 @@ export interface BuildAppOptions {
 export const buildApp = (db: DbClient, env: Env, opts: BuildAppOptions = {}): Hono => {
   const app = new Hono();
   app.route("/health", buildHealthRouter());
+  app.route("/api/health", buildHealthRouter());
   app.route("/api/auth", buildAuthRouter(db, env));
   app.route("/api/repos", buildReposRouter(db, env));
   app.route("/api/ingest", buildIngestRouter(db, env));

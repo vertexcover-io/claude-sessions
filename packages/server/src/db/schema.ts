@@ -169,6 +169,29 @@ export const sessionPrLinks = pgTable(
   (t) => ({ pk: primaryKey({ columns: [t.sessionId, t.prUrl] }) }),
 );
 
+export const sessionCommits = pgTable(
+  "session_commits",
+  {
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    sha: text("sha").notNull(),
+    shortSha: text("short_sha").notNull(),
+    authorName: text("author_name").notNull(),
+    authorEmail: text("author_email").notNull(),
+    authoredAt: timestamp("authored_at", { withTimezone: true, mode: "date" }).notNull(),
+    subject: text("subject").notNull(),
+    branch: text("branch"),
+    filesChanged: integer("files_changed"),
+    insertions: integer("insertions"),
+    deletions: integer("deletions"),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.sessionId, t.sha] }),
+    authoredIdx: index("session_commits_authored_at_idx").on(t.sessionId, t.authoredAt),
+  }),
+);
+
 export const auditLog = pgTable(
   "audit_log",
   {

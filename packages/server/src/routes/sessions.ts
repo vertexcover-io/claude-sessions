@@ -5,7 +5,15 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { type AuthVariables, buildRequireAuth } from "../auth/middleware.js";
 import type { DbClient } from "../db/client.js";
-import { events, embeddings, repos, sessionBlobs, sessions, summaries } from "../db/schema.js";
+import {
+  events,
+  embeddings,
+  repos,
+  sessionBlobs,
+  sessionCommits,
+  sessions,
+  summaries,
+} from "../db/schema.js";
 import { getEmbedProvider } from "../embed/index.js";
 import type { Env } from "../env.js";
 import { writeAudit } from "../lib/audit.js";
@@ -151,6 +159,137 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
         ts: r.ts.toISOString(),
         type: r.type,
         payload: r.payload,
+      })),
+    });
+  });
+
+  /**
+   * GET /api/sessions/:id/tool-calls — paired tool calls + results, in
+   * chronological order. The canonical event stream stores call and
+   * result as two separate `tool_use` rows joined by `tool_use_id`; this
+   * route does the join server-side so the web Tools tab can render
+   * them as a single "called → completed" pair with both timestamps.
+   */
+  router.get("/:id/tool-calls", async (c) => {
+    const user = c.get("user");
+    const sessionId = c.req.param("id");
+
+    const sessRows = await db
+      .select({ id: sessions.id, isPrivate: sessions.isPrivate })
+      .from(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .limit(1);
+    const sess = sessRows[0];
+    if (!sess) return c.json({ error: "session not found" }, 404);
+    if (sess.isPrivate) return c.json({ tool_calls: [] });
+
+    const rows = await db
+      .select({ ts: events.ts, payload: events.payload })
+      .from(events)
+      .where(and(eq(events.sessionId, sessionId), eq(events.type, "tool_use")))
+      .orderBy(asc(events.ts));
+
+    interface ToolPayload {
+      tool?: string;
+      tool_use_id?: string;
+      input_summary?: string;
+      output_summary?: string;
+      is_error?: boolean;
+    }
+    interface Pair {
+      tool_use_id: string;
+      tool: string | null;
+      input_summary: string | null;
+      output_summary: string | null;
+      is_error: boolean;
+      called_at: string | null;
+      completed_at: string | null;
+      duration_ms: number | null;
+    }
+    const byId = new Map<string, Pair>();
+
+    for (const r of rows) {
+      const p = r.payload as ToolPayload;
+      const id = p.tool_use_id;
+      if (!id) continue;
+      const ts = r.ts.toISOString();
+      const existing = byId.get(id) ?? {
+        tool_use_id: id,
+        tool: null,
+        input_summary: null,
+        output_summary: null,
+        is_error: false,
+        called_at: null,
+        completed_at: null,
+        duration_ms: null,
+      };
+      // The "call" side is the assistant-emitted record: has a tool name
+      // + input_summary. The "result" side is the user-shaped tool_result:
+      // has output_summary, blank tool name.
+      const isCall = !!p.tool && !!p.input_summary;
+      if (isCall) {
+        existing.tool = p.tool ?? existing.tool;
+        existing.input_summary = p.input_summary ?? existing.input_summary;
+        existing.called_at = ts;
+        if (p.is_error === true) existing.is_error = true;
+      } else {
+        existing.output_summary = p.output_summary ?? existing.output_summary;
+        existing.completed_at = ts;
+        if (p.is_error === true) existing.is_error = true;
+      }
+      byId.set(id, existing);
+    }
+
+    const pairs = [...byId.values()];
+    for (const p of pairs) {
+      if (p.called_at && p.completed_at) {
+        p.duration_ms = new Date(p.completed_at).getTime() - new Date(p.called_at).getTime();
+      }
+    }
+    pairs.sort((a, b) => {
+      const at = a.called_at ?? a.completed_at ?? "";
+      const bt = b.called_at ?? b.completed_at ?? "";
+      return at < bt ? -1 : at > bt ? 1 : 0;
+    });
+
+    return c.json({ tool_calls: pairs });
+  });
+
+  /**
+   * GET /api/sessions/:id/commits — commits authored on the local repo
+   * during the session window, mined by the CLI at ingest time.
+   */
+  router.get("/:id/commits", async (c) => {
+    const user = c.get("user");
+    const sessionId = c.req.param("id");
+
+    const sessRows = await db
+      .select({ id: sessions.id, isPrivate: sessions.isPrivate })
+      .from(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .limit(1);
+    const sess = sessRows[0];
+    if (!sess) return c.json({ error: "session not found" }, 404);
+    if (sess.isPrivate) return c.json({ commits: [] });
+
+    const rows = await db
+      .select()
+      .from(sessionCommits)
+      .where(eq(sessionCommits.sessionId, sessionId))
+      .orderBy(asc(sessionCommits.authoredAt));
+
+    return c.json({
+      commits: rows.map((r) => ({
+        sha: r.sha,
+        short_sha: r.shortSha,
+        author_name: r.authorName,
+        author_email: r.authorEmail,
+        authored_at: r.authoredAt.toISOString(),
+        subject: r.subject,
+        branch: r.branch,
+        files_changed: r.filesChanged,
+        insertions: r.insertions,
+        deletions: r.deletions,
       })),
     });
   });

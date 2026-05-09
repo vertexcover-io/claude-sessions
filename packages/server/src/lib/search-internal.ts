@@ -1,6 +1,6 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { type SQL, and, eq, gte, inArray, sql } from "drizzle-orm";
+import { type SQL, and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { DbClient } from "../db/client.js";
 import { repos, sessions, summaries, userRepos } from "../db/schema.js";
 import { getEmbedProvider } from "../embed/index.js";
@@ -9,6 +9,8 @@ export interface SearchFilters {
   repo?: string;
   branch?: string;
   agent?: string;
+  model?: string;
+  tag?: string;
   hasPr?: boolean;
   since?: string;
   limit?: number;
@@ -29,7 +31,9 @@ export interface SearchResultRow {
 
 export interface SearchResponse {
   results: SearchResultRow[];
-  strategy: "rrf";
+  /** `rrf` when ranked by hybrid FTS+vector; `recency` when no query was
+   *  provided and we just listed sessions matching the filters. */
+  strategy: "rrf" | "recency";
 }
 
 const RRF_K = 60;
@@ -65,9 +69,8 @@ export const searchInternal = async (
   filters: SearchFilters = {},
 ): Promise<SearchResponse> => {
   const limit = filters.limit ?? 20;
-  const provider = getEmbedProvider();
-  const qVec = await provider.embed(query);
-  const qVecLiteral = `[${qVec.join(",")}]`;
+  const trimmedQuery = query.trim();
+  const hasQuery = trimmedQuery.length > 0;
 
   const accessibleRepos = await db
     .select({ repoId: userRepos.repoId })
@@ -76,7 +79,7 @@ export const searchInternal = async (
   const accessibleRepoIds = accessibleRepos.map((r) => r.repoId);
 
   if (accessibleRepoIds.length === 0) {
-    return { results: [], strategy: "rrf" };
+    return { results: [], strategy: hasQuery ? "rrf" : "recency" };
   }
 
   const baseFilters: SQL[] = [
@@ -85,7 +88,23 @@ export const searchInternal = async (
   ];
   if (filters.branch) baseFilters.push(eq(sessions.branch, filters.branch));
   if (filters.agent) baseFilters.push(eq(sessions.agent, filters.agent));
+  if (filters.model) baseFilters.push(eq(sessions.model, filters.model));
   if (filters.since) baseFilters.push(gte(sessions.startedAt, new Date(filters.since)));
+  if (filters.hasPr === true) {
+    baseFilters.push(
+      sql`EXISTS (SELECT 1 FROM session_pr_links spl WHERE spl.session_id = ${sessions.id})`,
+    );
+  } else if (filters.hasPr === false) {
+    baseFilters.push(
+      sql`NOT EXISTS (SELECT 1 FROM session_pr_links spl WHERE spl.session_id = ${sessions.id})`,
+    );
+  }
+  // Tag filter — `summaries.tags` is text[]; use the `= ANY (tags)` pattern.
+  if (filters.tag) {
+    baseFilters.push(
+      sql`EXISTS (SELECT 1 FROM ${summaries} s WHERE s.session_id = ${sessions.id} AND ${filters.tag} = ANY(s.tags))`,
+    );
+  }
 
   let repoIdForFilter: string | null = null;
   if (filters.repo) {
@@ -103,46 +122,63 @@ export const searchInternal = async (
 
   const filterSql = and(...baseFilters);
 
-  // FTS top-K — weighted ts_rank over title + summary + tags.
-  const ftsRows = await db
-    .select({
-      id: sessions.id,
-      rank: sql<number>`ts_rank(summaries_fts_text(${summaries.title}, ${summaries.summary}, ${summaries.tags}), plainto_tsquery('english', ${query}))`,
-    })
-    .from(sessions)
-    .innerJoin(summaries, eq(summaries.sessionId, sessions.id))
-    .where(
-      and(
-        filterSql,
-        sql`summaries_fts_text(${summaries.title}, ${summaries.summary}, ${summaries.tags}) @@ plainto_tsquery('english', ${query})`,
-      ),
-    )
-    .orderBy(
-      sql`ts_rank(summaries_fts_text(${summaries.title}, ${summaries.summary}, ${summaries.tags}), plainto_tsquery('english', ${query})) DESC`,
-    )
-    .limit(TOP_K);
+  let merged: Array<{ id: string; score: number }> = [];
 
-  // Vector top-K — cosine distance via the <=> operator. We reuse the same
-  // `filterSql` constructed from drizzle column refs (which qualify as
-  // "sessions"."*"), so the FROM clause must use the unaliased table name.
-  const vecRows = await db.execute(sql`
-    SELECT sessions.id::text AS id
-    FROM sessions
-    JOIN embeddings ON embeddings.session_id = sessions.id
-    WHERE ${filterSql}
-    ORDER BY embeddings.embedding <=> ${qVecLiteral}::vector
-    LIMIT ${TOP_K}
-  `);
+  if (hasQuery) {
+    const provider = getEmbedProvider();
+    const qVec = await provider.embed(trimmedQuery);
+    const qVecLiteral = `[${qVec.join(",")}]`;
 
-  const vecIds = (vecRows as unknown as Array<{ id: string }>).map((r, i) => ({
-    id: r.id,
-    rank: i,
-  }));
-  const ftsIds = ftsRows.map((r, i) => ({ id: r.id, rank: i }));
+    // FTS top-K — weighted ts_rank over title + summary + tags.
+    const ftsRows = await db
+      .select({
+        id: sessions.id,
+        rank: sql<number>`ts_rank(summaries_fts_text(${summaries.title}, ${summaries.summary}, ${summaries.tags}), plainto_tsquery('english', ${trimmedQuery}))`,
+      })
+      .from(sessions)
+      .innerJoin(summaries, eq(summaries.sessionId, sessions.id))
+      .where(
+        and(
+          filterSql,
+          sql`summaries_fts_text(${summaries.title}, ${summaries.summary}, ${summaries.tags}) @@ plainto_tsquery('english', ${trimmedQuery})`,
+        ),
+      )
+      .orderBy(
+        sql`ts_rank(summaries_fts_text(${summaries.title}, ${summaries.summary}, ${summaries.tags}), plainto_tsquery('english', ${trimmedQuery})) DESC`,
+      )
+      .limit(TOP_K);
 
-  const merged = reciprocalRankFusion([ftsIds, vecIds], RRF_K).slice(0, limit);
+    // Vector top-K — cosine distance via the <=> operator. We reuse the same
+    // `filterSql` constructed from drizzle column refs (which qualify as
+    // "sessions"."*"), so the FROM clause must use the unaliased table name.
+    const vecRows = await db.execute(sql`
+      SELECT sessions.id::text AS id
+      FROM sessions
+      JOIN embeddings ON embeddings.session_id = sessions.id
+      WHERE ${filterSql}
+      ORDER BY embeddings.embedding <=> ${qVecLiteral}::vector
+      LIMIT ${TOP_K}
+    `);
+
+    const vecIds = (vecRows as unknown as Array<{ id: string }>).map((r, i) => ({
+      id: r.id,
+      rank: i,
+    }));
+    const ftsIds = ftsRows.map((r, i) => ({ id: r.id, rank: i }));
+    merged = reciprocalRankFusion([ftsIds, vecIds], RRF_K).slice(0, limit);
+  } else {
+    // No query → list filter-matched sessions, newest first.
+    const recencyRows = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(filterSql)
+      .orderBy(desc(sessions.startedAt))
+      .limit(limit);
+    merged = recencyRows.map((r, i) => ({ id: r.id, score: -i }));
+  }
+
   if (merged.length === 0) {
-    return { results: [], strategy: "rrf" };
+    return { results: [], strategy: hasQuery ? "rrf" : "recency" };
   }
 
   // Hydrate top-N with summary + repo. Apply has_pr filter post-hoc since it
@@ -194,6 +230,6 @@ export const searchInternal = async (
       ended_at: h.endedAt.toISOString(),
       total_cost_usd: h.totalCostUsd,
     })),
-    strategy: "rrf",
+    strategy: hasQuery ? "rrf" : "recency",
   };
 };
