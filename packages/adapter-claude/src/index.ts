@@ -41,11 +41,58 @@ interface RawLine {
     };
   };
   subtype?: string;
+  // Legacy shape (pre-2026): attachments declared `attachment_type` + `content`
+  // at the top level. Newer Claude Code transcripts nest the full payload
+  // under `attachment`. We support both.
   attachment_type?: string;
+  attachment?: { type?: string; [k: string]: unknown };
   content?: unknown;
   prompt?: unknown;
   files?: unknown;
+  // Indexer for forward-compat: `system` lines carry many sibling fields
+  // (durationMs, hookInfos, hookErrors, messageCount, …) that we want to
+  // surface verbatim on `SystemEvent.data`.
+  [k: string]: unknown;
 }
+
+/** Top-level RawLine keys that are *not* part of the structured `data`
+ *  payload — i.e. they're either bookkeeping (uuid, timestamp, …) or
+ *  already projected onto canonical fields. Anything else on a raw
+ *  `system` / `attachment` line is preserved on `SystemEvent.data`. */
+const SYSTEM_DATA_OMIT = new Set([
+  "type",
+  "uuid",
+  "parentUuid",
+  "timestamp",
+  "sessionId",
+  "cwd",
+  "gitBranch",
+  "version",
+  "permissionMode",
+  "message",
+  "subtype",
+  "attachment_type",
+  "content",
+  "prompt",
+  "files",
+  "isSidechain",
+  "userType",
+  "entrypoint",
+]);
+
+const collectSystemData = (
+  raw: RawLine,
+  extra?: Record<string, unknown>,
+): Record<string, unknown> | undefined => {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (SYSTEM_DATA_OMIT.has(k)) continue;
+    if (v === undefined) continue;
+    out[k] = v;
+  }
+  if (extra) Object.assign(out, extra);
+  return Object.keys(out).length > 0 ? out : undefined;
+};
 
 interface AssistantContentText {
   type: "text";
@@ -73,38 +120,46 @@ function clip(s: string, max = SUMMARY_MAX): string {
   return `${s.slice(0, max - 1)}…`;
 }
 
+/** Strip CSI / OSC ANSI escape sequences that leak in from shell output
+ *  (e.g. `<local-command-stdout>` blocks emitted by slash commands).
+ *  We do it at canonicalization time so search, summarizer, MCP, and
+ *  exports all see clean text. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: Explicitly matching ANSI escapes.
+const ANSI_RE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/g;
+const stripAnsi = (s: string): string => s.replace(ANSI_RE, "");
+
 function stringifyContent(content: unknown): string {
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return stripAnsi(content);
   if (content === null || content === undefined) return "";
   try {
-    return JSON.stringify(content);
+    return stripAnsi(JSON.stringify(content));
   } catch {
-    return String(content);
+    return stripAnsi(String(content));
   }
 }
 
 function summarizeToolInput(input: unknown): string {
   if (input === null || input === undefined) return "";
-  if (typeof input === "string") return clip(input);
+  if (typeof input === "string") return clip(stripAnsi(input));
   if (typeof input === "object") {
     // Common Claude Code shape — `command` for Bash, `file_path` for Edit/Read, etc.
     const o = input as Record<string, unknown>;
-    if (typeof o.command === "string") return clip(o.command);
-    if (typeof o.file_path === "string") return clip(o.file_path);
-    if (typeof o.path === "string") return clip(o.path);
-    if (typeof o.query === "string") return clip(o.query);
+    if (typeof o.command === "string") return clip(stripAnsi(o.command));
+    if (typeof o.file_path === "string") return clip(stripAnsi(o.file_path));
+    if (typeof o.path === "string") return clip(stripAnsi(o.path));
+    if (typeof o.query === "string") return clip(stripAnsi(o.query));
     try {
-      return clip(JSON.stringify(input));
+      return clip(stripAnsi(JSON.stringify(input)));
     } catch {
-      return clip(String(input));
+      return clip(stripAnsi(String(input)));
     }
   }
-  return clip(String(input));
+  return clip(stripAnsi(String(input)));
 }
 
 function summarizeToolOutput(content: unknown): string {
   if (content === null || content === undefined) return "";
-  if (typeof content === "string") return clip(content);
+  if (typeof content === "string") return clip(stripAnsi(content));
   if (Array.isArray(content)) {
     // Claude tool_result content is sometimes an array of {type:"text",text:...}
     const parts: string[] = [];
@@ -120,12 +175,12 @@ function summarizeToolOutput(content: unknown): string {
         parts.push(c);
       }
     }
-    return clip(parts.join("\n"));
+    return clip(stripAnsi(parts.join("\n")));
   }
   try {
-    return clip(JSON.stringify(content));
+    return clip(stripAnsi(JSON.stringify(content)));
   } catch {
-    return clip(String(content));
+    return clip(stripAnsi(String(content)));
   }
 }
 
@@ -139,6 +194,42 @@ function isUserToolResult(c: unknown): c is UserContentToolResult {
   return !!c && typeof c === "object" && (c as { type?: unknown }).type === "tool_result";
 }
 
+/** Stable per-line identifier when the source record has no `uuid`.
+ *  Some Claude Code records (`file-history-snapshot`, `queue-operation`,
+ *  forward-compat unknown types) lack `uuid`. Without a stable id, every
+ *  such line in a session would dedupe to the same row on ingest (the
+ *  composite PK is `(session_id, event_uuid)`). We synthesize a 32-hex
+ *  fingerprint from a few stable fields plus a JSON hash of the rest.
+ *  Deterministic so resync produces the same id; doesn't collide with
+ *  real Claude UUIDs (which are v4-shaped). */
+const synthEventUuid = (raw: RawLine): string => {
+  const seed = [
+    raw.type ?? "",
+    raw.timestamp ?? "",
+    typeof raw.message === "object" && raw.message
+      ? ((raw.message as { id?: string }).id ?? "")
+      : "",
+    typeof (raw as Record<string, unknown>).messageId === "string"
+      ? ((raw as Record<string, unknown>).messageId as string)
+      : "",
+    typeof (raw as Record<string, unknown>).operation === "string"
+      ? ((raw as Record<string, unknown>).operation as string)
+      : "",
+  ].join("|");
+  let hash = 5381;
+  for (let i = 0; i < seed.length; i++) hash = (hash * 33) ^ seed.charCodeAt(i);
+  // Add JSON-of-line hash so two snapshots at the same timestamp differ.
+  let line = "";
+  try {
+    line = JSON.stringify(raw);
+  } catch {
+    line = String(seed.length);
+  }
+  let lineHash = 0;
+  for (let i = 0; i < line.length; i++) lineHash = (lineHash * 31 + line.charCodeAt(i)) | 0;
+  return `synth-${(hash >>> 0).toString(16)}-${(lineHash >>> 0).toString(16)}`;
+};
+
 function baseFields(raw: RawLine): {
   ts: string;
   event_uuid: string;
@@ -146,21 +237,34 @@ function baseFields(raw: RawLine): {
 } {
   return {
     ts: raw.timestamp ?? new Date(0).toISOString(),
-    event_uuid: raw.uuid ?? "",
+    event_uuid: raw.uuid ?? synthEventUuid(raw),
     parent_uuid: raw.parentUuid ?? null,
   };
 }
 
 function parseUser(raw: RawLine): CanonicalEvent[] {
   const content = raw.message?.content;
-  // user-shaped tool_result: emit a tool_use event with output_summary populated.
+
+  // Array form: any mix of {type:"text"}, {type:"tool_result"}, or other
+  // blocks. We pull every text part into a single `user_msg` (so injected
+  // attachment text — slash-command bodies, skill-injection content,
+  // etc. — renders as readable markdown rather than JSON), and emit a
+  // `tool_use` event for each tool_result so the UI can pair it with
+  // the assistant call.
   if (Array.isArray(content)) {
     const events: CanonicalEvent[] = [];
+    const textParts: string[] = [];
+
     for (const c of content) {
       if (isUserToolResult(c)) {
+        const base = baseFields(raw);
         const tool: ToolUseEvent = {
           type: "tool_use",
-          ...baseFields(raw),
+          ts: base.ts,
+          // Disambiguate from sibling tool_results / the user_msg from the
+          // same raw record — they all share `raw.uuid`.
+          event_uuid: `${base.event_uuid}::result::${c.tool_use_id ?? events.length}`,
+          parent_uuid: base.parent_uuid,
           raw,
           tool: "",
           tool_use_id: c.tool_use_id ?? "",
@@ -169,15 +273,42 @@ function parseUser(raw: RawLine): CanonicalEvent[] {
           is_error: c.is_error === true,
         };
         events.push(tool);
+        continue;
+      }
+      if (
+        c &&
+        typeof c === "object" &&
+        (c as { type?: unknown }).type === "text" &&
+        typeof (c as { text?: unknown }).text === "string"
+      ) {
+        textParts.push(stripAnsi((c as { text: string }).text));
+        continue;
+      }
+      // Unknown block shape — preserve as JSON so we don't drop data.
+      try {
+        textParts.push(JSON.stringify(c));
+      } catch {
+        textParts.push(String(c));
       }
     }
+
+    if (textParts.length > 0) {
+      const userEv: UserMsgEvent = {
+        type: "user_msg",
+        ...baseFields(raw),
+        raw,
+        content_md: textParts.join("\n"),
+      };
+      events.unshift(userEv);
+    }
+
     if (events.length > 0) return events;
-    // Array but no tool_result — treat as plain user_msg with stringified content.
+    // Empty array — degenerate, but keep a stub user_msg.
     const userEv: UserMsgEvent = {
       type: "user_msg",
       ...baseFields(raw),
       raw,
-      content_md: stringifyContent(content),
+      content_md: "",
     };
     return [userEv];
   }
@@ -210,7 +341,7 @@ function parseAssistant(raw: RawLine): CanonicalEvent[] {
     const toolBlocks: AssistantContentToolUse[] = [];
     for (const c of content) {
       if (isAssistantText(c) && typeof c.text === "string") {
-        textParts.push(c.text);
+        textParts.push(stripAnsi(c.text));
       } else if (isAssistantToolUse(c)) {
         toolBlocks.push(c);
       }
@@ -229,9 +360,16 @@ function parseAssistant(raw: RawLine): CanonicalEvent[] {
     }
 
     for (const tb of toolBlocks) {
+      const base = baseFields(raw);
       const tool: ToolUseEvent = {
         type: "tool_use",
-        ...baseFields(raw),
+        ts: base.ts,
+        // A single assistant record can carry text + N tool_use blocks,
+        // all sharing `raw.uuid`. Disambiguate per-tool so the composite
+        // key (session_id, event_uuid) stays unique. Falls back to the
+        // block index when `tb.id` is missing.
+        event_uuid: `${base.event_uuid}::tool::${tb.id ?? events.length}`,
+        parent_uuid: base.parent_uuid,
         raw,
         tool: tb.name ?? "",
         tool_use_id: tb.id ?? "",
@@ -255,24 +393,48 @@ function parseAssistant(raw: RawLine): CanonicalEvent[] {
 }
 
 function parseSystem(raw: RawLine): CanonicalEvent[] {
+  const data = collectSystemData(raw);
   const ev: SystemEvent = {
     type: "system",
     ...baseFields(raw),
     raw,
     kind: typeof raw.subtype === "string" && raw.subtype.length > 0 ? raw.subtype : "system",
     content: stringifyContent(raw.content),
+    ...(data !== undefined ? { data } : {}),
   };
   return [ev];
 }
 
 function parseAttachment(raw: RawLine): CanonicalEvent[] {
-  const subtype = typeof raw.attachment_type === "string" ? raw.attachment_type : "unknown";
+  // New shape: nested `attachment` object with `type` + payload.
+  // Legacy shape: top-level `attachment_type` + `content`.
+  const nestedType =
+    raw.attachment && typeof raw.attachment.type === "string" ? raw.attachment.type : null;
+  const legacyType =
+    typeof raw.attachment_type === "string" && raw.attachment_type.length > 0
+      ? raw.attachment_type
+      : null;
+  const subtype = nestedType ?? legacyType ?? "unknown";
+
+  // Pull a sensible content preview — for nested attachments, prefer the
+  // hook output / text fields; fall back to JSON of the whole payload.
+  let content = stringifyContent(raw.content);
+  if (!content && raw.attachment) {
+    const a = raw.attachment;
+    if (typeof a.content === "string") content = a.content;
+    else if (typeof a.text === "string") content = a.text;
+    else if (typeof a.stdout === "string") content = a.stdout;
+    else content = stringifyContent(a);
+  }
+
+  const data = collectSystemData(raw);
   const ev: SystemEvent = {
     type: "system",
     ...baseFields(raw),
     raw,
     kind: `attachment.${subtype}`,
-    content: stringifyContent(raw.content),
+    content,
+    ...(data !== undefined ? { data } : {}),
   };
   return [ev];
 }
@@ -322,6 +484,13 @@ export function parseLine(line: string): CanonicalEvent[] {
     case "file-history-snapshot":
       return parseFileSnapshot(raw);
     case "last-prompt":
+    case "permission-mode":
+    case "ai-title":
+    case "queue-operation":
+      // Display-state meta records that newer Claude Code transcripts
+      // prepend or interleave; not part of conversation history. We
+      // track the latest permission mode at the session level via
+      // `aggregateSession`.
       return [];
     default:
       return parseUnknown(raw);
@@ -424,6 +593,13 @@ function parseLineFromRaw(raw: RawLine): CanonicalEvent[] {
     case "file-history-snapshot":
       return parseFileSnapshot(raw);
     case "last-prompt":
+    case "permission-mode":
+    case "ai-title":
+    case "queue-operation":
+      // Display-state meta records that newer Claude Code transcripts
+      // prepend or interleave; not part of conversation history. We
+      // track the latest permission mode at the session level via
+      // `aggregateSession`.
       return [];
     default:
       return parseUnknown(raw);

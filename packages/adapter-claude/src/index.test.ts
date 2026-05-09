@@ -319,3 +319,99 @@ describe("readSessionSync — file existence", () => {
     expect(s.size).toBeGreaterThan(0);
   });
 });
+
+describe("system / attachment lines preserve structured data", () => {
+  it("nested attachment.* keeps the full attachment object on data", () => {
+    const line = JSON.stringify({
+      type: "attachment",
+      uuid: "att-1",
+      parentUuid: "p-1",
+      timestamp: "2026-05-09T10:00:00.000Z",
+      sessionId: "s-1",
+      cwd: "/repo",
+      attachment: {
+        type: "hook_success",
+        hookName: "SessionStart:startup",
+        toolUseID: "abc",
+        hookEvent: "SessionStart",
+        content: "OK",
+        stdout: "OK\n",
+        stderr: "",
+        exitCode: 0,
+        command: "cmux claude-hook session-start",
+        durationMs: 229,
+      },
+    });
+    const events = parseLine(line) as SystemEvent[];
+    expect(events).toHaveLength(1);
+    const ev = events[0];
+    if (!ev) throw new Error("no event");
+    expect(ev.type).toBe("system");
+    expect(ev.kind).toBe("attachment.hook_success");
+    expect(ev.content).toBe("OK");
+    expect(ev.data).toBeDefined();
+    expect(ev.data?.attachment).toMatchObject({
+      type: "hook_success",
+      hookName: "SessionStart:startup",
+      exitCode: 0,
+      durationMs: 229,
+    });
+  });
+
+  it("legacy attachment_type still maps to attachment.<subtype>", () => {
+    const line = JSON.stringify({
+      type: "attachment",
+      uuid: "att-2",
+      parentUuid: null,
+      timestamp: "2026-05-09T10:00:01.000Z",
+      attachment_type: "screenshot",
+      content: "data:image/png;base64,...",
+    });
+    const events = parseLine(line) as SystemEvent[];
+    expect(events).toHaveLength(1);
+    expect(events[0]?.kind).toBe("attachment.screenshot");
+    expect(events[0]?.content).toContain("data:image/png");
+  });
+
+  it("system subtype keeps sibling fields (durationMs, hookInfos) on data", () => {
+    const line = JSON.stringify({
+      type: "system",
+      uuid: "sys-1",
+      parentUuid: "p-2",
+      timestamp: "2026-05-09T10:00:02.000Z",
+      subtype: "stop_hook_summary",
+      hookCount: 1,
+      hookInfos: [{ command: "cmux claude-hook stop", durationMs: 333 }],
+      hookErrors: [],
+    });
+    const events = parseLine(line) as SystemEvent[];
+    expect(events).toHaveLength(1);
+    const ev = events[0];
+    if (!ev) throw new Error("no event");
+    expect(ev.kind).toBe("stop_hook_summary");
+    expect(ev.data).toMatchObject({
+      hookCount: 1,
+      hookInfos: [{ command: "cmux claude-hook stop", durationMs: 333 }],
+      hookErrors: [],
+    });
+    // Bookkeeping fields must NOT leak into data.
+    expect(ev.data).not.toHaveProperty("uuid");
+    expect(ev.data).not.toHaveProperty("timestamp");
+    expect(ev.data).not.toHaveProperty("subtype");
+  });
+
+  it("turn_duration keeps durationMs and messageCount on data", () => {
+    const line = JSON.stringify({
+      type: "system",
+      uuid: "sys-2",
+      parentUuid: null,
+      timestamp: "2026-05-09T10:00:03.000Z",
+      subtype: "turn_duration",
+      durationMs: 111891,
+      messageCount: 63,
+    });
+    const events = parseLine(line) as SystemEvent[];
+    expect(events[0]?.kind).toBe("turn_duration");
+    expect(events[0]?.data).toEqual({ durationMs: 111891, messageCount: 63 });
+  });
+});
