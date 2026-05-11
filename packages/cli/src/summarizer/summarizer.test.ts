@@ -2,7 +2,7 @@
 
 import type { SessionSummary } from "@claude-sessions/core";
 import { describe, expect, it } from "vitest";
-import type { UploadClient } from "../upload/client.js";
+import { HttpError, type UploadClient } from "../upload/client.js";
 import { Summarizer } from "./index.js";
 
 const buildOkSummary = (id: string): SessionSummary => ({
@@ -71,6 +71,24 @@ describe("Summarizer (REQ-018, REQ-019)", () => {
     expect(upload.uploads).toHaveLength(1);
     const stored = upload.uploads[0]?.summary as SessionSummary;
     expect(stored.status).toBe("failed");
+  });
+
+  it("404 from pipeline short-circuits — no retries, no failure-marker upload", async () => {
+    let attempts = 0;
+    const upload = new FakeUpload();
+    const sum = new Summarizer({
+      upload: upload as unknown as UploadClient,
+      retryDelaysMs: [0, 0, 0],
+      runPipeline: () => {
+        attempts++;
+        return Promise.reject(new HttpError(404, '{"error":"session not found"}'));
+      },
+      logger: () => undefined,
+    });
+    const out = await sum.summarize("s-missing", "/tmp/x.jsonl");
+    expect(attempts).toBe(1);
+    expect(out.status).toBe("failed");
+    expect(upload.uploads).toHaveLength(0);
   });
 
   it("REQ-019: max 2 in-flight when 10 are enqueued", async () => {

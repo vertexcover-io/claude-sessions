@@ -23,7 +23,10 @@ const commitSchema = z.object({
   short_sha: z.string().min(4),
   author_name: z.string(),
   author_email: z.string(),
-  authored_at: z.string().datetime(),
+  // git's `%aI` emits strict ISO 8601 with a numeric offset
+  // (e.g. `2026-05-10T11:30:45+05:30`), so we must accept offsets,
+  // not just Z-suffix UTC.
+  authored_at: z.string().datetime({ offset: true }),
   subject: z.string(),
   branch: z.string().nullable(),
   files_changed: z.number().int().nonnegative().nullable(),

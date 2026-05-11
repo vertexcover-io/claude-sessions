@@ -1,7 +1,7 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
 import type { SessionSummary } from "@claude-sessions/core";
-import type { UploadClient } from "../upload/client.js";
+import { HttpError, type UploadClient } from "../upload/client.js";
 import type { runClaude } from "./claude-runner.js";
 import { type PipelineDeps, summarizeAndUpload } from "./pipeline.js";
 import type { minePrs } from "./pr-mining.js";
@@ -55,6 +55,20 @@ class Semaphore {
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const RETRY_DELAYS_MS = [1_000, 4_000, 16_000] as const;
+
+const makeFailedSummary = (sessionId: string, error: string): SessionSummary => ({
+  session_id: sessionId,
+  title: "",
+  summary: "",
+  tags: [],
+  files_touched: [],
+  prs_referenced: [],
+  tool_call_counts: {},
+  generated_at: new Date().toISOString(),
+  model: "sonnet",
+  status: "failed",
+  error,
+});
 
 export interface SummarizerOptions {
   upload: UploadClient;
@@ -116,6 +130,14 @@ export class Summarizer {
           return await this.runPipeline(sessionId, deps);
         } catch (err) {
           lastErr = err;
+          // 404 from the server means it has no record of this session for
+          // the current user (DB reset, account switch, never-ingested).
+          // Retrying and uploading a failure marker will both 404 too —
+          // log once and bail.
+          if (err instanceof HttpError && err.status === 404) {
+            this.logger(`summarize skipped for ${sessionId}: server has no such session`);
+            return makeFailedSummary(sessionId, err.message);
+          }
           this.logger(
             `summarize attempt ${attempt + 1} failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
           );
@@ -127,27 +149,18 @@ export class Summarizer {
       }
       // Exhausted retries — best-effort upload of a `failed` row so the
       // UI can offer a retry button.
-      const failedSummary: SessionSummary = {
-        session_id: sessionId,
-        title: "",
-        summary: "",
-        tags: [],
-        files_touched: [],
-        prs_referenced: [],
-        tool_call_counts: {},
-        generated_at: new Date().toISOString(),
-        model: "sonnet",
-        status: "failed",
-        error: lastErr instanceof Error ? lastErr.message : String(lastErr),
-      };
+      const marker = makeFailedSummary(
+        sessionId,
+        lastErr instanceof Error ? lastErr.message : String(lastErr),
+      );
       try {
-        await this.upload.uploadSummary(sessionId, failedSummary);
+        await this.upload.uploadSummary(sessionId, marker);
       } catch (uploadErr) {
         this.logger(
           `failed to upload failure marker for ${sessionId}: ${uploadErr instanceof Error ? uploadErr.message : String(uploadErr)}`,
         );
       }
-      return failedSummary;
+      return marker;
     } finally {
       this.sem.release();
     }
