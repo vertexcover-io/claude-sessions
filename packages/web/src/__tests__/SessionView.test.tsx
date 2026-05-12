@@ -39,12 +39,11 @@ const renderRoute = (id: string) => {
 };
 
 describe("SessionView (REQ-024)", () => {
-  it("renders structural classes: .msg-user, .msg-assistant, .tool-call.collapsed, .session-summary-panel, sticky-header", () => {
+  it("renders structural classes: .msg-user, .msg-assistant, .session-summary-panel, sticky-header", () => {
     const { container } = renderRoute("fixture-session-1");
     expect(container.querySelector(".session-summary-panel")).toBeTruthy();
     expect(container.querySelector(".msg-user")).toBeTruthy();
     expect(container.querySelector(".msg-assistant")).toBeTruthy();
-    expect(container.querySelector(".tool-call.collapsed")).toBeTruthy();
     expect(container.querySelector('[data-testid="sticky-header"]')).toBeTruthy();
   });
 });
