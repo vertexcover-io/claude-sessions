@@ -163,6 +163,7 @@ export interface SessionSummary {
   model: string;
   status: "pending" | "ok" | "failed";
   error?: string;
+  summarized_event_count?: number;
 }
 
 /**
