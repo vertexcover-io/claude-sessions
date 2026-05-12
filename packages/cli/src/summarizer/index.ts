@@ -1,6 +1,7 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import type { SessionSummary } from "@claude-sessions/core";
+import { readSessionSync } from "@claude-sessions/adapter-claude";
+import type { CanonicalSession, SessionSummary } from "@claude-sessions/core";
 import { HttpError, type UploadClient } from "../upload/client.js";
 import type { runClaude } from "./claude-runner.js";
 import { type PipelineDeps, summarizeAndUpload } from "./pipeline.js";
@@ -84,6 +85,13 @@ export interface SummarizerOptions {
   runClaudeImpl?: typeof runClaude;
   /** Inject a custom PR-miner. */
   minePrsImpl?: typeof minePrs;
+  /**
+   * Minimum number of new events since the last successful summary required
+   * to re-summarize. Defaults to 5 (REQ-013).
+   */
+  minResumarizeDelta?: number;
+  /** Inject a custom session reader (tests). Defaults to `readSessionSync`. */
+  readSessionImpl?: (path: string) => CanonicalSession;
 }
 
 /**
@@ -100,6 +108,8 @@ export class Summarizer {
   private runPipeline: (sessionId: string, deps: PipelineDeps) => Promise<SessionSummary>;
   private runClaudeImpl: typeof runClaude | undefined;
   private minePrsImpl: typeof minePrs | undefined;
+  private minResumarizeDelta: number;
+  private readSessionImpl: (path: string) => CanonicalSession;
 
   constructor(opts: SummarizerOptions) {
     this.upload = opts.upload;
@@ -109,15 +119,61 @@ export class Summarizer {
     this.runPipeline = opts.runPipeline ?? summarizeAndUpload;
     this.runClaudeImpl = opts.runClaudeImpl;
     this.minePrsImpl = opts.minePrsImpl;
+    this.minResumarizeDelta = opts.minResumarizeDelta ?? 5;
+    this.readSessionImpl = opts.readSessionImpl ?? readSessionSync;
   }
 
   inFlight(): number {
     return this.sem.inFlight();
   }
 
-  async summarize(sessionId: string, jsonlPath: string): Promise<SessionSummary> {
+  private async checkWatermarkSkip(
+    sessionId: string,
+    jsonlPath: string,
+  ): Promise<SessionSummary | null> {
+    try {
+      const existing = await this.upload.getSession(sessionId);
+      const s = existing.summary;
+      if (!s || s.status !== "ok" || s.summarized_event_count == null) return null;
+      const session = this.readSessionImpl(jsonlPath);
+      const currentCount = session.events.length;
+      const delta = currentCount - s.summarized_event_count;
+      if (delta >= this.minResumarizeDelta) return null;
+      this.logger(
+        `summarize skipped for ${sessionId}: delta=${delta} < ${this.minResumarizeDelta}`,
+      );
+      return {
+        session_id: sessionId,
+        title: s.title ?? "",
+        summary: s.summary ?? "",
+        tags: s.tags,
+        files_touched: s.files_touched,
+        prs_referenced: s.prs_referenced,
+        tool_call_counts: s.tool_call_counts,
+        generated_at: new Date().toISOString(),
+        model: "unknown",
+        status: "ok",
+        summarized_event_count: s.summarized_event_count,
+      };
+    } catch (err) {
+      this.logger(
+        `watermark check failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  async summarize(
+    sessionId: string,
+    jsonlPath: string,
+    opts?: { force?: boolean },
+  ): Promise<SessionSummary> {
     await this.sem.acquire();
     try {
+      if (opts?.force !== true) {
+        const skip = await this.checkWatermarkSkip(sessionId, jsonlPath);
+        if (skip) return skip;
+      }
       const deps: PipelineDeps = {
         upload: this.upload,
         jsonlPath,

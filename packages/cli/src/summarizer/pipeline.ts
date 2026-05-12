@@ -105,6 +105,7 @@ export const summarizeAndUpload = async (
     generated_at: new Date().toISOString(),
     model,
     status: "ok",
+    summarized_event_count: session.events.length,
   };
 
   await deps.upload.uploadSummary(sessionId, summary);
