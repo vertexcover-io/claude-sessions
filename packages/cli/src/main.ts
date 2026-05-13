@@ -14,6 +14,7 @@ import { logsCommand } from "./commands/logs.js";
 import { mcpCommand } from "./commands/mcp.js";
 import { nameCommand } from "./commands/name.js";
 import { openCommand } from "./commands/open.js";
+import { runsCommand } from "./commands/runs.js";
 import { statusCommand } from "./commands/status.js";
 import { summarizeCommand } from "./commands/summarize.js";
 import { syncCommand } from "./commands/sync.js";
@@ -170,6 +171,37 @@ const main = async (): Promise<void> => {
       });
       process.exit(code);
     });
+
+  program
+    .command("runs")
+    .description("Show summarization runs (claude -p invocations) with cost and token totals.")
+    .option("--limit <n>", "max rows to list", "20")
+    .option("--since <iso>", "only runs at or after this timestamp")
+    .option("--since-days <n>", "filter to the last N days")
+    .option("--status <s>", "filter by status (ok|failed)")
+    .option("--session <id>", "filter to a single session")
+    .option("--stats", "show only the aggregate, skip the row table", false)
+    .action(
+      async (opts: {
+        limit?: string;
+        since?: string;
+        sinceDays?: string;
+        status?: string;
+        session?: string;
+        stats?: boolean;
+      }) => {
+        const client = buildClient();
+        const params: Parameters<typeof runsCommand>[0] = { client };
+        if (opts.limit) params.limit = Number.parseInt(opts.limit, 10);
+        if (opts.since) params.since = opts.since;
+        if (opts.sinceDays) params.sinceDays = Number.parseInt(opts.sinceDays, 10);
+        if (opts.status === "ok" || opts.status === "failed") params.status = opts.status;
+        if (opts.session) params.sessionId = opts.session;
+        if (opts.stats) params.statsOnly = true;
+        const r = await runsCommand(params);
+        process.exit(r.exit);
+      },
+    );
 
   program
     .command("find <query...>")

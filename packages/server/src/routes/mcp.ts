@@ -7,6 +7,8 @@ import { z } from "zod";
 import { verifyToken } from "../auth/jwt.js";
 import type { DbClient } from "../db/client.js";
 import type { Env } from "../env.js";
+import { and, eq, gte, sql } from "drizzle-orm";
+import { sessions, summarizationRuns } from "../db/schema.js";
 import { searchInternal } from "../lib/search-internal.js";
 import {
   findSessionsForPr,
@@ -74,6 +76,40 @@ const buildMcpServer = (db: DbClient, userId: string): McpServer => {
       if (args.repo !== undefined) opts.repo = args.repo;
       const result = await listRecent(db, userId, opts);
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    },
+  );
+
+  server.tool(
+    "get_summarization_stats",
+    "Aggregate stats over `claude -p` summarization runs (calls, cost, retries, failures). Optional since_days filter (default: all time).",
+    {
+      since_days: z.number().int().min(1).max(365).optional(),
+    },
+    async ({ since_days }) => {
+      const filters = [eq(sessions.userId, userId)];
+      if (since_days !== undefined) {
+        const since = new Date();
+        since.setDate(since.getDate() - since_days);
+        filters.push(gte(summarizationRuns.startedAt, since));
+      }
+      const rows = await db
+        .select({
+          calls: sql<number>`count(*)::int`,
+          successes: sql<number>`count(*) FILTER (WHERE ${summarizationRuns.status} = 'ok')::int`,
+          failures: sql<number>`count(*) FILTER (WHERE ${summarizationRuns.status} = 'failed')::int`,
+          retries: sql<number>`count(*) FILTER (WHERE ${summarizationRuns.attempt} > 1)::int`,
+          input_tokens: sql<string>`coalesce(sum(${summarizationRuns.inputTokens}), 0)::text`,
+          output_tokens: sql<string>`coalesce(sum(${summarizationRuns.outputTokens}), 0)::text`,
+          cache_creation_tokens: sql<string>`coalesce(sum(${summarizationRuns.cacheCreationTokens}), 0)::text`,
+          cache_read_tokens: sql<string>`coalesce(sum(${summarizationRuns.cacheReadTokens}), 0)::text`,
+          total_cost_usd: sql<string>`coalesce(sum(${summarizationRuns.totalCostUsd}), 0)::text`,
+          avg_duration_ms: sql<number | null>`avg(${summarizationRuns.durationMs})::int`,
+          p95_duration_ms: sql<number | null>`percentile_cont(0.95) within group (order by ${summarizationRuns.durationMs})::int`,
+        })
+        .from(summarizationRuns)
+        .innerJoin(sessions, eq(sessions.id, summarizationRuns.sessionId))
+        .where(and(...filters));
+      return { content: [{ type: "text", text: JSON.stringify(rows[0] ?? {}) }] };
     },
   );
 

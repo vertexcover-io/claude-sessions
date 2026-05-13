@@ -45,14 +45,15 @@ const fakeExec = (
 describe("decodeEnvelope", () => {
   it("returns structured_output when present", () => {
     const out = _internal.decodeEnvelope(JSON.stringify({ structured_output: { title: "ok" } }));
-    expect(out).toEqual({ title: "ok" });
+    expect(out.output).toEqual({ title: "ok" });
+    expect(out.meta.total_cost_usd).toBe(0);
   });
 
   it("falls back to JSON-parsing the result string when structured_output is missing", () => {
     const out = _internal.decodeEnvelope(
       JSON.stringify({ result: JSON.stringify({ title: "fallback" }) }),
     );
-    expect(out).toEqual({ title: "fallback" });
+    expect(out.output).toEqual({ title: "fallback" });
   });
 
   it("throws on non-JSON output", () => {
@@ -87,7 +88,7 @@ describe("runClaude", () => {
       schema: { type: "object" },
       execFileImpl: exec,
     });
-    expect(out).toEqual({ title: "summary" });
+    expect(out.output).toEqual({ title: "summary" });
     expect(receivedArgs).toContain("--no-session-persistence");
     expect(receivedArgs).toContain("--disallowedTools");
     expect(receivedArgs).toContain("Bash");
@@ -108,7 +109,7 @@ describe("runClaude", () => {
       schema: {},
       execFileImpl: exec,
     });
-    expect(out).toEqual({ title: "result-string", summary: "x" });
+    expect(out.output).toEqual({ title: "result-string", summary: "x" });
   });
 
   it("surfaces stderr when claude exits non-zero", async () => {

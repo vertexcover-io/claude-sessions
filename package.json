@@ -12,11 +12,11 @@
     "format": "biome format --write .",
     "typecheck": "turbo run typecheck",
     "db:migrate": "turbo run db:migrate",
-    "stack:up": "docker compose up -d --build",
-    "stack:down": "docker compose down",
-    "stack:logs": "docker compose logs -f api",
-    "stack:rebuild": "docker compose build api && docker compose up -d",
-    "stack:dev": "CLAUDE_SESSIONS_DEV=1 docker compose up -d --build",
+    "stack:up": "podman compose up -d --build",
+    "stack:down": "podman compose down",
+    "stack:logs": "podman compose logs -f api",
+    "stack:rebuild": "podman compose build api && podman compose up -d",
+    "stack:dev": "CLAUDE_SESSIONS_DEV=1 podman compose up -d --build",
     "watch": "turbo run watch --parallel"
   },
   "devDependencies": {

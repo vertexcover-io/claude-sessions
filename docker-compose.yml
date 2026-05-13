@@ -44,7 +44,7 @@ services:
       # `vite build --watch` is enough for SPA changes.
       CLAUDE_SESSIONS_DEV: ${CLAUDE_SESSIONS_DEV:-0}
     # Bind dist dirs from the host so we don't have to rebuild the
-    # docker image on every code change. The paths match what the
+    # container image on every code change. The paths match what the
     # baked Dockerfile copies into the image.
     volumes:
       - ./packages/core/dist:/app/packages/core/dist

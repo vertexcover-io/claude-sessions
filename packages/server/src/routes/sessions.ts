@@ -13,6 +13,7 @@ import {
   sessionCommits,
   sessions,
   summaries,
+  summarizationRuns,
 } from "../db/schema.js";
 import { getEmbedProvider } from "../embed/index.js";
 import type { Env } from "../env.js";
@@ -37,6 +38,27 @@ const summarySchema = z.object({
 const patchSchema = z.object({
   name: z.string().nullable().optional(),
   is_private: z.boolean().optional(),
+});
+
+const summarizationRunSchema = z.object({
+  attempt: z.number().int().min(1),
+  status: z.enum(["ok", "failed"]),
+  started_at: z.string().datetime(),
+  ended_at: z.string().datetime(),
+  duration_ms: z.number().int().nonnegative(),
+  duration_api_ms: z.number().int().nonnegative().nullable().optional(),
+  claude_model: z.string().min(1),
+  stop_reason: z.string().nullable().optional(),
+  num_turns: z.number().int().nonnegative().nullable().optional(),
+  input_tokens: z.number().int().nonnegative().default(0),
+  output_tokens: z.number().int().nonnegative().default(0),
+  cache_creation_tokens: z.number().int().nonnegative().default(0),
+  cache_read_tokens: z.number().int().nonnegative().default(0),
+  total_cost_usd: z.number().nonnegative().default(0),
+  prompt_chars: z.number().int().nonnegative(),
+  truncated: z.boolean().default(false),
+  error: z.string().nullable().optional(),
+  raw_usage: z.unknown().optional(),
 });
 
 const MAX_BLOB_BYTES = 100 * 1024 * 1024;
@@ -380,6 +402,48 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
     });
 
     return c.json({ ok: true, embedded: vector !== null });
+  });
+
+  router.post("/:id/summarization-runs", async (c) => {
+    const user = c.get("user");
+    const sessionId = c.req.param("id");
+    const parsed = summarizationRunSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
+    const body = parsed.data;
+
+    const sessRows = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .limit(1);
+    if (!sessRows[0]) return c.json({ error: "session not found" }, 404);
+
+    const inserted = await db
+      .insert(summarizationRuns)
+      .values({
+        sessionId,
+        attempt: body.attempt,
+        status: body.status,
+        startedAt: new Date(body.started_at),
+        endedAt: new Date(body.ended_at),
+        durationMs: body.duration_ms,
+        durationApiMs: body.duration_api_ms ?? null,
+        claudeModel: body.claude_model,
+        stopReason: body.stop_reason ?? null,
+        numTurns: body.num_turns ?? null,
+        inputTokens: body.input_tokens,
+        outputTokens: body.output_tokens,
+        cacheCreationTokens: body.cache_creation_tokens,
+        cacheReadTokens: body.cache_read_tokens,
+        totalCostUsd: body.total_cost_usd.toString(),
+        promptChars: body.prompt_chars,
+        truncated: body.truncated,
+        error: body.error ?? null,
+        rawUsage: (body.raw_usage ?? null) as never,
+      })
+      .returning({ id: summarizationRuns.id });
+
+    return c.json({ ok: true, id: inserted[0]?.id ?? null });
   });
 
   /**

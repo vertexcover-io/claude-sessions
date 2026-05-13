@@ -193,6 +193,39 @@ export const sessionCommits = pgTable(
   }),
 );
 
+export const summarizationRuns = pgTable(
+  "summarization_runs",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    attempt: integer("attempt").notNull(),
+    status: text("status").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true, mode: "date" }).notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true, mode: "date" }).notNull(),
+    durationMs: integer("duration_ms").notNull(),
+    durationApiMs: integer("duration_api_ms"),
+    claudeModel: text("claude_model").notNull(),
+    stopReason: text("stop_reason"),
+    numTurns: integer("num_turns"),
+    inputTokens: integer("input_tokens").notNull().default(0),
+    outputTokens: integer("output_tokens").notNull().default(0),
+    cacheCreationTokens: integer("cache_creation_tokens").notNull().default(0),
+    cacheReadTokens: integer("cache_read_tokens").notNull().default(0),
+    totalCostUsd: numeric("total_cost_usd", { precision: 12, scale: 6 }).notNull().default("0"),
+    promptChars: integer("prompt_chars").notNull(),
+    truncated: boolean("truncated").notNull().default(false),
+    error: text("error"),
+    rawUsage: jsonb("raw_usage"),
+  },
+  (t) => ({
+    sessionIdx: index("idx_summ_runs_session").on(t.sessionId),
+    startedIdx: index("idx_summ_runs_started").on(t.startedAt),
+    statusIdx: index("idx_summ_runs_status").on(t.status),
+  }),
+);
+
 export const auditLog = pgTable(
   "audit_log",
   {

@@ -174,16 +174,17 @@ export class Summarizer {
         const skip = await this.checkWatermarkSkip(sessionId, jsonlPath);
         if (skip) return skip;
       }
-      const deps: PipelineDeps = {
+      const baseDeps: PipelineDeps = {
         upload: this.upload,
         jsonlPath,
+        recordLogger: this.logger,
         ...(this.runClaudeImpl ? { runClaudeImpl: this.runClaudeImpl } : {}),
         ...(this.minePrsImpl ? { minePrsImpl: this.minePrsImpl } : {}),
       };
       let lastErr: unknown = null;
       for (let attempt = 0; attempt <= this.retryDelaysMs.length; attempt++) {
         try {
-          return await this.runPipeline(sessionId, deps);
+          return await this.runPipeline(sessionId, { ...baseDeps, attempt: attempt + 1 });
         } catch (err) {
           lastErr = err;
           // 404 from the server means it has no record of this session for
