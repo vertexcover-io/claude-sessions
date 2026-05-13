@@ -11,6 +11,7 @@ import { buildReposRouter } from "./routes/repos.js";
 import { buildSearchRouter } from "./routes/search.js";
 import { buildSessionsRouter } from "./routes/sessions.js";
 import { buildStaticSpa } from "./routes/static.js";
+import { buildSummarizationRunsRouter } from "./routes/summarization-runs.js";
 
 export interface BuildAppOptions {
   webDist?: string;
@@ -25,6 +26,7 @@ export const buildApp = (db: DbClient, env: Env, opts: BuildAppOptions = {}): Ho
   app.route("/api/ingest", buildIngestRouter(db, env));
   app.route("/api/sessions", buildSessionsRouter(db, env));
   app.route("/api/search", buildSearchRouter(db, env));
+  app.route("/api/summarization-runs", buildSummarizationRunsRouter(db, env));
   app.route("/mcp", buildMcpRouter(db, env));
   app.use("*", buildStaticSpa(opts.webDist));
   app.onError((err, c) => {

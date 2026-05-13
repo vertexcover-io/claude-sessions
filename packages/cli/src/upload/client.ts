@@ -71,6 +71,64 @@ export interface SessionDetail {
   [k: string]: unknown;
 }
 
+export interface SummarizationRunRow {
+  id: string;
+  session_id: string;
+  attempt: number;
+  status: "ok" | "failed";
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  duration_api_ms: number | null;
+  claude_model: string;
+  stop_reason: string | null;
+  num_turns: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_cost_usd: string;
+  prompt_chars: number;
+  truncated: boolean;
+  error: string | null;
+}
+
+export interface SummarizationStats {
+  since: string | null;
+  calls: number;
+  successes: number;
+  failures: number;
+  retries: number;
+  input_tokens: string | number;
+  output_tokens: string | number;
+  cache_creation_tokens: string | number;
+  cache_read_tokens: string | number;
+  total_cost_usd: string;
+  avg_duration_ms: number | null;
+  p95_duration_ms: number | null;
+}
+
+export interface SummarizationRunPayload {
+  attempt: number;
+  status: "ok" | "failed";
+  started_at: string;
+  ended_at: string;
+  duration_ms: number;
+  duration_api_ms: number | null;
+  claude_model: string;
+  stop_reason: string | null;
+  num_turns: number | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_cost_usd: number;
+  prompt_chars: number;
+  truncated: boolean;
+  error: string | null;
+  raw_usage: unknown;
+}
+
 export interface UploadClientOptions {
   serverUrl: string;
   token: string;
@@ -124,6 +182,51 @@ export class UploadClient {
    */
   async uploadSummary(sessionId: string, summary: unknown): Promise<void> {
     await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/summary`, summary);
+  }
+
+  async recordSummarizationRun(sessionId: string, run: SummarizationRunPayload): Promise<void> {
+    await this.request(
+      `/api/sessions/${encodeURIComponent(sessionId)}/summarization-runs`,
+      run,
+    );
+  }
+
+  async listSummarizationRuns(params: {
+    since?: string;
+    status?: "ok" | "failed";
+    sessionId?: string;
+    limit?: number;
+  }): Promise<{ runs: SummarizationRunRow[] }> {
+    const search = new URLSearchParams();
+    if (params.since) search.set("since", params.since);
+    if (params.status) search.set("status", params.status);
+    if (params.sessionId) search.set("session_id", params.sessionId);
+    if (params.limit !== undefined) search.set("limit", String(params.limit));
+    const qs = search.toString();
+    const res = await this.fetchImpl(
+      `${this.serverUrl}/api/summarization-runs${qs ? `?${qs}` : ""}`,
+      { method: "GET", headers: { authorization: `Bearer ${this.token}` } },
+    );
+    const text = await res.text();
+    if (!res.ok) throw new HttpError(res.status, text || res.statusText);
+    return text ? (JSON.parse(text) as { runs: SummarizationRunRow[] }) : { runs: [] };
+  }
+
+  async getSummarizationStats(params: {
+    since?: string;
+    sinceDays?: number;
+  }): Promise<SummarizationStats> {
+    const search = new URLSearchParams();
+    if (params.since) search.set("since", params.since);
+    if (params.sinceDays !== undefined) search.set("since_days", String(params.sinceDays));
+    const qs = search.toString();
+    const res = await this.fetchImpl(
+      `${this.serverUrl}/api/summarization-runs/stats${qs ? `?${qs}` : ""}`,
+      { method: "GET", headers: { authorization: `Bearer ${this.token}` } },
+    );
+    const text = await res.text();
+    if (!res.ok) throw new HttpError(res.status, text || res.statusText);
+    return JSON.parse(text) as SummarizationStats;
   }
 
   /**

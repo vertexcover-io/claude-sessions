@@ -3,41 +3,23 @@
 import { readFile } from "node:fs/promises";
 import { readSessionSync } from "@claude-sessions/adapter-claude";
 import type { CanonicalSession, SessionSummary } from "@claude-sessions/core";
-import type { UploadClient } from "../upload/client.js";
+import type { SummarizationRunPayload, UploadClient } from "../upload/client.js";
+import type { ClaudeRunMeta } from "./claude-runner.js";
 import { runClaude } from "./claude-runner.js";
 import { computeDeterministic } from "./deterministic.js";
 import { minePrs } from "./pr-mining.js";
 import { SUMMARY_SCHEMA, SYSTEM_PROMPT, buildPromptUserMessage } from "./prompt.js";
 
-/**
- * End-to-end summarization for a single session (REQ-017, REQ-026, REQ-061).
- *
- * Steps:
- *   1. Re-read JSONL from disk (chokidar may have raced with us).
- *   2. Compute deterministic fields (files_touched, tool_call_counts, PRs).
- *   3. PR mining with `gh pr list` fallback when nothing is in the transcript.
- *   4. Build prompt + invoke `claude -p` for the LLM-generated fields.
- *   5. Merge LLM output with deterministic counts/files/PRs.
- *   6. POST summary (server generates embedding inline).
- *   7. PUT raw blob bytes.
- *
- * The caller (`Summarizer.summarize`) wraps this in a semaphore and
- * exp-backoff retry.
- */
-
 export interface PipelineDeps {
   upload: UploadClient;
   jsonlPath: string;
-  /** Inject a fake disk reader (tests). */
   readSession?: (path: string) => CanonicalSession;
-  /** Inject a fake claude runner (tests). */
   runClaudeImpl?: typeof runClaude;
-  /** Inject the pr-mining function (tests). */
   minePrsImpl?: typeof minePrs;
-  /** Inject a custom blob reader (tests). */
   readBlob?: (path: string) => Promise<Uint8Array>;
-  /** Override the model name embedded in the summary metadata. */
   model?: string;
+  attempt?: number;
+  recordLogger?: (msg: string) => void;
 }
 
 interface LlmSummary {
@@ -71,6 +53,56 @@ const parseLlmOutput = (raw: unknown): LlmSummary => {
   };
 };
 
+const buildRunPayload = (args: {
+  attempt: number;
+  status: "ok" | "failed";
+  startedAt: Date;
+  endedAt: Date;
+  claudeModel: string;
+  promptChars: number;
+  truncated: boolean;
+  meta: ClaudeRunMeta | null;
+  error: string | null;
+}): SummarizationRunPayload => {
+  const { attempt, status, startedAt, endedAt, claudeModel, promptChars, truncated, meta, error } =
+    args;
+  return {
+    attempt,
+    status,
+    started_at: startedAt.toISOString(),
+    ended_at: endedAt.toISOString(),
+    duration_ms: endedAt.getTime() - startedAt.getTime(),
+    duration_api_ms: meta?.duration_api_ms ?? null,
+    claude_model: claudeModel,
+    stop_reason: meta?.stop_reason ?? null,
+    num_turns: meta?.num_turns ?? null,
+    input_tokens: meta?.usage.input_tokens ?? 0,
+    output_tokens: meta?.usage.output_tokens ?? 0,
+    cache_creation_tokens: meta?.usage.cache_creation_input_tokens ?? 0,
+    cache_read_tokens: meta?.usage.cache_read_input_tokens ?? 0,
+    total_cost_usd: meta?.total_cost_usd ?? 0,
+    prompt_chars: promptChars,
+    truncated,
+    error,
+    raw_usage: meta?.raw_usage ?? null,
+  };
+};
+
+const safeRecord = async (
+  upload: UploadClient,
+  sessionId: string,
+  payload: SummarizationRunPayload,
+  log: (msg: string) => void,
+): Promise<void> => {
+  try {
+    await upload.recordSummarizationRun(sessionId, payload);
+  } catch (err) {
+    log(
+      `summarization-run record failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+};
+
 export const summarizeAndUpload = async (
   sessionId: string,
   deps: PipelineDeps,
@@ -80,19 +112,51 @@ export const summarizeAndUpload = async (
   const minePrsFn = deps.minePrsImpl ?? minePrs;
   const readBlobFn = deps.readBlob ?? (async (p: string) => new Uint8Array(await readFile(p)));
   const model = deps.model ?? "sonnet";
+  const attempt = deps.attempt ?? 1;
+  const log = deps.recordLogger ?? ((m) => process.stderr.write(`${m}\n`));
 
   const session = readSession(deps.jsonlPath);
   const det = computeDeterministic(session);
   const minedPrs = await minePrsFn(session, det);
 
   const prompt = buildPromptUserMessage(session, det);
-  const raw = await runClaudeFn({
-    systemPrompt: SYSTEM_PROMPT,
-    userMessage: prompt.text,
-    schema: SUMMARY_SCHEMA,
-    model,
-  });
-  const llm = parseLlmOutput(raw);
+  const startedAt = new Date();
+  let claudeResult: Awaited<ReturnType<typeof runClaudeFn>> | null = null;
+  let claudeError: unknown = null;
+  try {
+    claudeResult = await runClaudeFn({
+      systemPrompt: SYSTEM_PROMPT,
+      userMessage: prompt.text,
+      schema: SUMMARY_SCHEMA,
+      model,
+    });
+  } catch (err) {
+    claudeError = err;
+  }
+  const endedAt = new Date();
+
+  await safeRecord(
+    deps.upload,
+    sessionId,
+    buildRunPayload({
+      attempt,
+      status: claudeError ? "failed" : "ok",
+      startedAt,
+      endedAt,
+      claudeModel: model,
+      promptChars: prompt.text.length,
+      truncated: prompt.truncated,
+      meta: claudeResult?.meta ?? null,
+      error: claudeError ? (claudeError instanceof Error ? claudeError.message : String(claudeError)) : null,
+    }),
+    log,
+  );
+
+  if (claudeError || !claudeResult) {
+    throw claudeError ?? new Error("claude returned no result");
+  }
+
+  const llm = parseLlmOutput(claudeResult.output);
 
   const summary: SessionSummary = {
     session_id: sessionId,

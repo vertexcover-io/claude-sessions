@@ -61,11 +61,27 @@ describe("summarizeAndUpload pipeline (e2e with mocked claude)", () => {
       jsonlPath: path,
       runClaudeImpl: () =>
         Promise.resolve({
-          title: "Pipeline e2e summary",
-          summary: "User asked for a summary. The assistant acknowledged. No tools were used.",
-          tags: ["e2e", "pipeline"],
-          files_touched: [],
-          prs_referenced: [],
+          output: {
+            title: "Pipeline e2e summary",
+            summary: "User asked for a summary. The assistant acknowledged. No tools were used.",
+            tags: ["e2e", "pipeline"],
+            files_touched: [],
+            prs_referenced: [],
+          },
+          meta: {
+            duration_ms: 100,
+            duration_api_ms: 80,
+            num_turns: 1,
+            stop_reason: "end_turn",
+            total_cost_usd: 0.0001,
+            usage: {
+              input_tokens: 10,
+              output_tokens: 5,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
+            raw_usage: null,
+          },
         }),
       minePrsImpl: () => Promise.resolve([]),
     });

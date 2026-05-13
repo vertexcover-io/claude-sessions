@@ -31,7 +31,7 @@ Single-process server, no worker, no Redis. All write-side work (redact, persist
 
 ```sh
 cd claude-sessions
-docker compose up -d postgres
+podman compose up -d postgres
 cp .env.example .env                  # edit DATABASE_URL, JWT_SECRET, OPENAI_API_KEY
 bun install
 bun run db:migrate                    # creates extensions, tables, indexes

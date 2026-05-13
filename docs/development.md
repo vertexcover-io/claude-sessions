@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Bun 1.2+
-- Docker (or Podman) for the Postgres container
+- Podman (or Docker) for the Postgres container
 - Node 22+ in PATH (`tsx` and the running server use it)
 - An OpenAI API key if you want real embeddings (otherwise `EMBED_PROVIDER=fake`)
 
@@ -11,7 +11,7 @@
 
 ```sh
 cd claude-sessions
-docker compose up -d postgres
+podman compose up -d postgres
 cp .env.example .env             # set JWT_SECRET, OPENAI_API_KEY (optional)
 bun install
 bun run db:migrate               # idempotent; runs every new file in src/db/migrations
