@@ -11,6 +11,7 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "typecheck": "turbo run typecheck",
+    "prepare": "git config core.hooksPath .githooks 2>/dev/null || true",
     "db:migrate": "turbo run db:migrate",
     "stack:up": "podman compose up -d --build",
     "stack:down": "podman compose down",
