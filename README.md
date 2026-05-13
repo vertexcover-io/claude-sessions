@@ -88,7 +88,8 @@ Token + per-repo state live under `~/.claude-sessions/` (override with `CLAUDE_S
 | `disable [path] [--purge]` | Stop syncing this repo locally; `--purge` deletes its events from the server |
 | `status` | Print a table of enabled repos and their last-sync timestamps |
 | `sync` | One-shot catch-up: stream any pending events for every enabled repo |
-| `watch` | Long-running tail. Watches JSONL parents, dedupes via byte offsets, summarizes on session-end silence |
+| `watch` | Long-running tail. Watches JSONL parents, dedupes via byte offsets, summarizes only on **live** session-end silence (pre-existing JSONLs are backfilled without invoking `claude -p`) |
+| `summarize <session-id>` / `summarize --all [--force] [--since <ISO>] [--yes]` | One-shot summarization. Skips sessions with an `ok` summary unless new events accumulate beyond the watermark (or `--force`). `--all` prompts before spending LLM quota; `--yes` skips the prompt |
 | `fork <session-id> --until <event-uuid> [--cwd <path>]` | Pull blob, truncate, rewrite cwd + sessionId, write a fresh JSONL under `~/.claude/projects/`, print resume command |
 | `name <session-id> [name]` | Set or clear the user-set display name (overrides LLM title) |
 | `find <query...>` | Open dashboard search at `<server>/search?q=...` |

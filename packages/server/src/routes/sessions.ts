@@ -31,6 +31,7 @@ const summarySchema = z.object({
   model: z.string(),
   status: z.enum(["pending", "ok", "failed"]),
   error: z.string().optional(),
+  summarized_event_count: z.number().int().nonnegative().optional(),
 });
 
 const patchSchema = z.object({
@@ -343,6 +344,7 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
           model: body.model,
           status: body.status,
           error: body.error ?? null,
+          summarizedEventCount: body.summarized_event_count ?? null,
         })
         .onConflictDoUpdate({
           target: summaries.sessionId,
@@ -357,6 +359,7 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
             model: body.model,
             status: body.status,
             error: body.error ?? null,
+            summarizedEventCount: body.summarized_event_count ?? null,
           },
         });
 
@@ -534,6 +537,7 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
             prs_referenced: summary.prsReferenced,
             tool_call_counts: summary.toolCallCounts,
             status: summary.status,
+            summarized_event_count: summary.summarizedEventCount ?? null,
           }
         : null,
     });

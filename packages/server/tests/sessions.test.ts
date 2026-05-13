@@ -184,6 +184,51 @@ describe("POST /api/sessions/:id/summary", () => {
     expect(res.status).toBe(404);
   });
 
+  it("REQ-007/REQ-014: round-trips summarized_event_count via POST and GET /:id", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "summ-watermark@example.test",
+      repoUrl: "github.com/example/summary-watermark",
+    });
+    const sessionId = "session-summary-watermark";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const body = buildSummaryBody(sessionId);
+    body.summarized_event_count = 42;
+
+    const postRes = await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    expect(postRes.status).toBe(200);
+
+    const getRes = await get(`/api/sessions/${sessionId}`, seed.token);
+    expect(getRes.status).toBe(200);
+    const json = (await getRes.json()) as {
+      summary: { summarized_event_count: number | null } | null;
+    };
+    expect(json.summary?.summarized_event_count).toBe(42);
+  });
+
+  it("REQ-007/REQ-014: omitting summarized_event_count yields null on GET", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "summ-watermark-null@example.test",
+      repoUrl: "github.com/example/summary-watermark-null",
+    });
+    const sessionId = "session-summary-watermark-null";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const postRes = await post(
+      `/api/sessions/${sessionId}/summary`,
+      seed.token,
+      buildSummaryBody(sessionId),
+    );
+    expect(postRes.status).toBe(200);
+
+    const getRes = await get(`/api/sessions/${sessionId}`, seed.token);
+    expect(getRes.status).toBe(200);
+    const json = (await getRes.json()) as {
+      summary: { summarized_event_count: number | null } | null;
+    };
+    expect(json.summary?.summarized_event_count).toBeNull();
+  });
+
   it("skips embedding generation when status='failed'", async () => {
     const seed = await seedUser(db.db, env.JWT_SECRET, {
       email: "summ-failed@example.test",

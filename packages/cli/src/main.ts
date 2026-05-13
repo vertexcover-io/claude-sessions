@@ -15,6 +15,7 @@ import { mcpCommand } from "./commands/mcp.js";
 import { nameCommand } from "./commands/name.js";
 import { openCommand } from "./commands/open.js";
 import { statusCommand } from "./commands/status.js";
+import { summarizeCommand } from "./commands/summarize.js";
 import { syncCommand } from "./commands/sync.js";
 import { watchCommand } from "./commands/watch.js";
 
@@ -115,6 +116,31 @@ const main = async (): Promise<void> => {
       const client = buildClient();
       await watchCommand({ client });
     });
+
+  program
+    .command("summarize [session-id]")
+    .description("Summarize a session by id, or all enabled-repo sessions with --all.")
+    .option("--all", "summarize every discovered session", false)
+    .option("--force", "bypass watermark/status gate", false)
+    .option("--since <iso>", "only include sessions started at or after this ISO-8601 timestamp")
+    .option("--yes", "skip the confirmation prompt", false)
+    .action(
+      async (
+        sessionId: string | undefined,
+        opts: { all: boolean; force: boolean; since?: string; yes: boolean },
+      ) => {
+        const client = buildClient();
+        const code = await summarizeCommand({
+          client,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+          all: opts.all,
+          force: opts.force,
+          ...(opts.since !== undefined ? { since: opts.since } : {}),
+          yes: opts.yes,
+        });
+        process.exit(code);
+      },
+    );
 
   program
     .command("fork <session-id>")

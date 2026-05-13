@@ -33,6 +33,8 @@ The CLI invokes `claude -p` with the structured-output schema, mines PRs determi
 
 If you're tempted to add `claude -p` to the server, stop and put it in `cli/src/summarizer/`.
 
+**Summarization is gated on live activity + a watermark.** `JsonlWatcher` only schedules `SessionEndDetector` on chokidar `add`/`change` events fired *after* the listener installs — pre-existing JSONLs are backfilled silently via `consumeFile`. `Summarizer.summarize` then skips when an existing `ok` summary's `summarized_event_count` is within `minResumarizeDelta` (default 5) of the current count. The `summaries.summarized_event_count` column (nullable; `0004_summarized_event_count.sql`) is the persisted watermark. `summarize --force` and `Summarizer({ force: true })` bypass both gates. This is what keeps idle backfill (e.g. opening `watch` against a folder of 90 archived sessions) from incinerating LLM quota.
+
 ### Redaction is canonical at the CLI; server is defense in depth
 
 `packages/core/src/redact.ts` is THE redaction implementation (regex patterns + Shannon-entropy heuristic, idempotent). The CLI runs it on every event before upload. The server runs `redactDeep` (which wraps `core.redact`) on ingest payloads as a safety net for misbehaving or legacy clients.
@@ -115,9 +117,9 @@ All timestamp columns are `timestamp with time zone`. ISO strings on the wire en
 - Search (RRF + FTS + vector): `packages/server/src/lib/search-internal.ts`
 - MCP server (6 tools): `packages/server/src/routes/mcp.ts`
 - CLI entry: `packages/cli/src/main.ts`
-- CLI commands: `packages/cli/src/commands/`
+- CLI commands: `packages/cli/src/commands/` (incl. `summarize.ts` for one-shot + `--all` runs)
 - CLI watcher + uploader: `packages/cli/src/watcher/` and `packages/cli/src/upload/`
-- CLI summarizer: `packages/cli/src/summarizer/`
+- CLI summarizer: `packages/cli/src/summarizer/` (watermark + skip-rule live in `index.ts`)
 - Web SPA pages: `packages/web/src/pages/`
 - Web transcript components: `packages/web/src/components/transcript/`
 

@@ -54,6 +54,23 @@ export interface IngestPayload {
   commits?: IngestCommit[];
 }
 
+export interface SessionDetailSummary {
+  title: string | null;
+  summary: string | null;
+  tags: string[];
+  files_touched: string[];
+  prs_referenced: string[];
+  tool_call_counts: Record<string, number>;
+  status: "pending" | "ok" | "failed";
+  summarized_event_count?: number | null;
+}
+
+export interface SessionDetail {
+  id: string;
+  summary: SessionDetailSummary | null;
+  [k: string]: unknown;
+}
+
 export interface UploadClientOptions {
   serverUrl: string;
   token: string;
@@ -172,7 +189,7 @@ export class UploadClient {
    * GET /api/sessions/:id — full session metadata (used by `fork` to
    * resolve the source repo and by `name`/UI to render display_name).
    */
-  async getSession(sessionId: string): Promise<Record<string, unknown>> {
+  async getSession(sessionId: string): Promise<SessionDetail> {
     const res = await this.fetchImpl(
       `${this.serverUrl}/api/sessions/${encodeURIComponent(sessionId)}`,
       {
@@ -182,7 +199,9 @@ export class UploadClient {
     );
     const text = await res.text();
     if (!res.ok) throw new HttpError(res.status, text || res.statusText);
-    return text ? (JSON.parse(text) as Record<string, unknown>) : {};
+    return text
+      ? (JSON.parse(text) as SessionDetail)
+      : ({ id: sessionId, summary: null } as SessionDetail);
   }
 
   /**

@@ -133,6 +133,7 @@ export const summaries = pgTable("summaries", {
   model: text("model"),
   status: text("status").notNull().default("pending"),
   error: text("error"),
+  summarizedEventCount: integer("summarized_event_count"),
 });
 
 export const embeddings = pgTable("embeddings", {

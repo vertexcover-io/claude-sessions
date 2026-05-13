@@ -69,8 +69,9 @@ export class JsonlWatcher {
 
   async start(): Promise<void> {
     const files = (this.opts.discover ?? defaultDiscover)();
-    // Catch-up pass first.
-    for (const f of files) await this.consumeSafe(f);
+    // Catch-up pass first. Backfill must NOT arm the end-detect timer —
+    // pre-existing JSONLs are historical, not live activity (REQ-001).
+    for (const f of files) await this.consumeSafe(f, { armEndDetect: false });
     // Then install live watcher on parent directories.
     const dirs = Array.from(new Set(files.map((f) => dirname(f))));
     if (dirs.length === 0) return;
@@ -82,7 +83,7 @@ export class JsonlWatcher {
     });
     const onChange = (p: string): void => {
       if (!p.endsWith(".jsonl")) return;
-      void this.consumeSafe(p);
+      void this.consumeSafe(p, { armEndDetect: true });
     };
     this.watcher.on("change", onChange);
     this.watcher.on("add", onChange);
@@ -102,7 +103,8 @@ export class JsonlWatcher {
     await Promise.allSettled(this.inflight.values());
   }
 
-  private async consumeSafe(path: string): Promise<void> {
+  private async consumeSafe(path: string, opts?: { armEndDetect?: boolean }): Promise<void> {
+    const armEndDetect = opts?.armEndDetect !== false;
     // Serialize per-file so a quick burst of writes doesn't trigger
     // overlapping consumes that would race on `state.json`.
     const prev = this.inflight.get(path) ?? Promise.resolve();
@@ -111,7 +113,7 @@ export class JsonlWatcher {
       .then(async () => {
         try {
           await consumeFile(path, this.opts.client);
-          this.scheduleEndDetect(path);
+          if (armEndDetect) this.scheduleEndDetect(path);
         } catch (err) {
           const log = this.opts.logger ?? ((m) => console.error(m));
           if (err instanceof HttpError) {

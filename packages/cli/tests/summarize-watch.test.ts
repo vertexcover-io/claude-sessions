@@ -1,5 +1,8 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
+import type { FSWatcher, watch as chokidarWatch } from "chokidar";
+
+type ChokidarFactory = typeof chokidarWatch;
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { enableCommand } from "../src/commands/enable.js";
 import type { Summarizer } from "../src/summarizer/index.js";
@@ -13,6 +16,29 @@ import {
   createSessionFile,
   makeFixtureEnv,
 } from "./helpers/tmp-jsonl.js";
+
+interface FakeChokidar {
+  watcher: FSWatcher;
+  emitAdd: (path: string) => void;
+}
+
+const makeFakeChokidar = (): FakeChokidar => {
+  const handlers: Record<string, ((...args: unknown[]) => void)[]> = {};
+  return {
+    emitAdd: (p) => {
+      for (const h of handlers.add ?? []) h(p);
+    },
+    watcher: {
+      on(event: string, cb: (...args: unknown[]) => void) {
+        const list = handlers[event] ?? [];
+        list.push(cb);
+        handlers[event] = list;
+        return this;
+      },
+      close: () => Promise.resolve(),
+    } as unknown as FSWatcher,
+  };
+};
 
 let fixture: FixtureEnv;
 let server: MockServerHandle;
@@ -28,12 +54,12 @@ afterEach(async () => {
 });
 
 describe("watcher wires summarizer end-detect (REQ-016)", () => {
-  it("schedules end-detect after a successful consume; firing triggers Summarizer", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+  it("a live add event schedules end-detect; firing triggers Summarizer", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: false });
     const repo = makeTempGitRepo("git@github.com:fixture/summarizer-wire.git");
     try {
       const sid = "session-summarize-wire";
-      createSessionFile(fixture.projectsRoot, repo.path, sid, [
+      const file = createSessionFile(fixture.projectsRoot, repo.path, sid, [
         buildEvent({ uuid: "w1", sessionId: sid, cwd: repo.path }),
         buildEvent({ uuid: "w2", sessionId: sid, cwd: repo.path, type: "assistant" }),
       ]);
@@ -64,24 +90,37 @@ describe("watcher wires summarizer end-detect (REQ-016)", () => {
         inFlight: () => 0,
       } as unknown as Summarizer;
 
-      // First, register the repo via enableCommand so backfill runs.
+      // Register the repo via enableCommand so the file is known on disk
+      // (backfill no longer arms end-detect post-Phase 4).
       await enableCommand({
         path: repo.path,
         client,
       });
 
-      // Start a fresh watcher with our summarizer wired in. This will also
-      // do a catch-up consume — same file, no new bytes — and then schedule
-      // end-detect on it (silenceMs=10ms for the test).
+      // Start a fresh watcher with our summarizer wired in. Inject a fake
+      // chokidar so we can synthesize a live `add` event for the same file
+      // — this is what arms end-detect (silenceMs=10ms for the test).
+      const fake = makeFakeChokidar();
       const watcher = new JsonlWatcher({
         client,
         summarizer: fakeSummarizer,
         silenceMs: 10,
+        chokidarFactory: ((_paths, _opts) => fake.watcher) as unknown as ChokidarFactory,
       });
       await watcher.start();
+      await Promise.resolve();
+      // Catch-up alone must not arm end-detect.
+      expect(summarized).toEqual([]);
+
+      // Synthesize a live add event for the same file.
+      fake.emitAdd(file.path);
+      await vi.advanceTimersByTimeAsync(0);
+      await watcher.drain();
 
       // Advance through the silence window.
       await vi.advanceTimersByTimeAsync(50);
+      await Promise.resolve();
+      await Promise.resolve();
       await watcher.stop();
 
       expect(summarized).toContain(sid);
