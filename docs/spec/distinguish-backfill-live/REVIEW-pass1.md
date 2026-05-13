@@ -88,9 +88,9 @@ The server response doesn't carry `model`, so the skip-return uses
 in production currently inspects these fields. Worth a quick scan of
 downstream consumers if the return value ever becomes user-visible.
 
-### S5. `0003_summarized_event_count.sql` is not idempotent
+### S5. `0004_summarized_event_count.sql` is not idempotent
 
-`packages/server/src/db/migrations/0003_summarized_event_count.sql`
+`packages/server/src/db/migrations/0004_summarized_event_count.sql`
 
 `ALTER TABLE summaries ADD COLUMN summarized_event_count integer NULL`
 will error on re-run. This is consistent with the existing migration

@@ -23,7 +23,7 @@ classification holds: the six S-items are non-blocking.
 | S2 `needsSummarize` errors → include | `commands/summarize.ts:82-96` | **No.** Worst case wastes LLM quota on a transient outage; the user still sees `<N> succeeded, <M> failed` and can re-run. Not a correctness defect. |
 | S3 pluralization | `commands/summarize.ts:170` | **No.** Spec text is reproduced verbatim. |
 | S4 `model: "unknown"` in skip-return | `summarizer/index.ts:142-157` | **No.** Both call sites that consume the return — `JsonlWatcher.onEnded` (`watcher/chokidar.ts:61-65`) and `summarizeCommand` (`commands/summarize.ts:139, 182`) — discard the returned `SessionSummary`. No user-visible field comes from it today. |
-| S5 migration not idempotent | `0003_summarized_event_count.sql` | **No.** Matches existing convention (`0001_init.sql`, `0002_*.sql` likewise lack `IF NOT EXISTS`). |
+| S5 migration not idempotent | `0004_summarized_event_count.sql` | **No.** Matches existing convention (`0001_init.sql`, `0002_*.sql` likewise lack `IF NOT EXISTS`). |
 | S6 add non-HttpError test case | `summarizer/summarizer.test.ts:386-401` | **No.** The generic `catch (err)` in `checkWatermarkSkip` covers all throws; the existing HttpError(500) test exercises that branch. Adding a second case is cheap but unnecessary for confidence. |
 
 ## Independent findings (focus areas)
@@ -32,7 +32,7 @@ classification holds: the six S-items are non-blocking.
 
 - **Canonical types in `core`:** `SessionSummary.summarized_event_count?: number` correctly added to `packages/core/src/types.ts:166`. The new `SessionDetail` / `SessionDetailSummary` interfaces live in `packages/cli/src/upload/client.ts` — these are HTTP-wire-shape adapters local to the CLI uploader, not canonical domain types, so they belong there. No CLAUDE.md violation.
 - **Summarization stays in CLI:** `claude -p` is still only invoked from `cli/src/summarizer/`. The server-side change (`routes/sessions.ts`) is purely DB column round-trip plumbing.
-- **Drizzle ↔ SQL kept in sync:** `summarizedEventCount: integer("summarized_event_count")` (schema.ts:136) matches `0003_summarized_event_count.sql`. Nullable in both. CLAUDE.md "kept in sync by hand" satisfied.
+- **Drizzle ↔ SQL kept in sync:** `summarizedEventCount: integer("summarized_event_count")` (schema.ts:136) matches `0004_summarized_event_count.sql`. Nullable in both. CLAUDE.md "kept in sync by hand" satisfied.
 - **Redaction:** untouched. The new column is integer; nothing to redact.
 - **`event_uuid` dedupe:** untouched.
 

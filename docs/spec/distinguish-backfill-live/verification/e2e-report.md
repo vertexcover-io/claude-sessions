@@ -29,7 +29,7 @@ Infrastructure:
 - Postgres 5434 (existing `claude-sessions-pgvector` container, schema fresh
   from `0001 → 0003` migrations applied on API startup).
 - API: `tsx packages/server/src/main.ts` on `localhost:3000`. Migration
-  `0003_summarized_event_count.sql` applied automatically on boot —
+  `0004_summarized_event_count.sql` applied automatically on boot —
   `summarized_event_count integer NULL` column confirmed present on `summaries`.
 - CLI: built artifact at `packages/cli/dist/main.js`.
 - `claude` binary on PATH (Claude Code 2.1.139).

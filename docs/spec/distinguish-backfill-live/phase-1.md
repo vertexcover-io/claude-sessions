@@ -13,7 +13,7 @@ Server-only. No CLI changes. After this phase, the data plane supports the water
 
 **Files:**
 - Modify: `packages/server/src/db/schema.ts` — add `summarizedEventCount: integer("summarized_event_count")` to the `summaries` table (nullable, no default).
-- Create: `packages/server/src/db/migrations/0003_summarized_event_count.sql` — `ALTER TABLE summaries ADD COLUMN summarized_event_count integer NULL;`. Idempotent guard with `IF NOT EXISTS` is fine but not required (migrations are run once).
+- Create: `packages/server/src/db/migrations/0004_summarized_event_count.sql` — `ALTER TABLE summaries ADD COLUMN summarized_event_count integer NULL;`. Idempotent guard with `IF NOT EXISTS` is fine but not required (migrations are run once).
 - Modify: `packages/server/src/routes/sessions.ts`:
   - Extend `summarySchema` (line 22): add `summarized_event_count: z.number().int().nonnegative().optional()`.
   - Extend the `POST /:id/summary` insert + `onConflictDoUpdate` set blocks to write `summarizedEventCount: body.summarized_event_count ?? null`.

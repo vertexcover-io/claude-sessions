@@ -33,7 +33,7 @@ The CLI invokes `claude -p` with the structured-output schema, mines PRs determi
 
 If you're tempted to add `claude -p` to the server, stop and put it in `cli/src/summarizer/`.
 
-**Summarization is gated on live activity + a watermark.** `JsonlWatcher` only schedules `SessionEndDetector` on chokidar `add`/`change` events fired *after* the listener installs — pre-existing JSONLs are backfilled silently via `consumeFile`. `Summarizer.summarize` then skips when an existing `ok` summary's `summarized_event_count` is within `minResumarizeDelta` (default 5) of the current count. The `summaries.summarized_event_count` column (nullable; `0003_summarized_event_count.sql`) is the persisted watermark. `summarize --force` and `Summarizer({ force: true })` bypass both gates. This is what keeps idle backfill (e.g. opening `watch` against a folder of 90 archived sessions) from incinerating LLM quota.
+**Summarization is gated on live activity + a watermark.** `JsonlWatcher` only schedules `SessionEndDetector` on chokidar `add`/`change` events fired *after* the listener installs — pre-existing JSONLs are backfilled silently via `consumeFile`. `Summarizer.summarize` then skips when an existing `ok` summary's `summarized_event_count` is within `minResumarizeDelta` (default 5) of the current count. The `summaries.summarized_event_count` column (nullable; `0004_summarized_event_count.sql`) is the persisted watermark. `summarize --force` and `Summarizer({ force: true })` bypass both gates. This is what keeps idle backfill (e.g. opening `watch` against a folder of 90 archived sessions) from incinerating LLM quota.
 
 ### Redaction is canonical at the CLI; server is defense in depth
 
