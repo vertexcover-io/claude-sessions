@@ -100,7 +100,9 @@ export const buildSummarizationRunsRouter = (
         cache_read_tokens: sql<number>`coalesce(sum(${summarizationRuns.cacheReadTokens}), 0)::bigint`,
         total_cost_usd: sql<string>`coalesce(sum(${summarizationRuns.totalCostUsd}), 0)::text`,
         avg_duration_ms: sql<number | null>`avg(${summarizationRuns.durationMs})::int`,
-        p95_duration_ms: sql<number | null>`percentile_cont(0.95) within group (order by ${summarizationRuns.durationMs})::int`,
+        p95_duration_ms: sql<
+          number | null
+        >`percentile_cont(0.95) within group (order by ${summarizationRuns.durationMs})::int`,
       })
       .from(summarizationRuns)
       .innerJoin(sessions, eq(sessions.id, summarizationRuns.sessionId))

@@ -185,10 +185,7 @@ export class UploadClient {
   }
 
   async recordSummarizationRun(sessionId: string, run: SummarizationRunPayload): Promise<void> {
-    await this.request(
-      `/api/sessions/${encodeURIComponent(sessionId)}/summarization-runs`,
-      run,
-    );
+    await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/summarization-runs`, run);
   }
 
   async listSummarizationRuns(params: {

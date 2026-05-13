@@ -62,7 +62,8 @@ interface ClaudeEnvelope {
   usage?: unknown;
 }
 
-const asNumber = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const asNumber = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) ? v : null;
 const asString = (v: unknown): string | null => (typeof v === "string" ? v : null);
 
 const extractUsage = (raw: unknown): ClaudeUsage => {

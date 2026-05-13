@@ -16,8 +16,7 @@ const pad = (s: string, n: number): string => (s.length >= n ? s : s + " ".repea
 const padLeft = (s: string, n: number): string =>
   s.length >= n ? s : " ".repeat(n - s.length) + s;
 
-const fmtDuration = (ms: number): string =>
-  ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
+const fmtDuration = (ms: number): string => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`);
 
 const fmtUsd = (raw: string | number): string => {
   const n = typeof raw === "string" ? Number.parseFloat(raw) : raw;
@@ -61,7 +60,9 @@ const printTable = (rows: SummarizationRunRow[]): string => {
   );
   const render = (row: string[]): string =>
     row
-      .map((c, i) => (rights.has(i) ? padLeft(c, widths[i] as number) : pad(c, widths[i] as number)))
+      .map((c, i) =>
+        rights.has(i) ? padLeft(c, widths[i] as number) : pad(c, widths[i] as number),
+      )
       .join("  ");
   return `${[render(headers), ...cells.map(render)].join("\n")}\n`;
 };

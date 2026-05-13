@@ -147,7 +147,11 @@ export const summarizeAndUpload = async (
       promptChars: prompt.text.length,
       truncated: prompt.truncated,
       meta: claudeResult?.meta ?? null,
-      error: claudeError ? (claudeError instanceof Error ? claudeError.message : String(claudeError)) : null,
+      error: claudeError
+        ? claudeError instanceof Error
+          ? claudeError.message
+          : String(claudeError)
+        : null,
     }),
     log,
   );
