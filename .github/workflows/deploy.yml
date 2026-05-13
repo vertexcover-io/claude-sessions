@@ -1,0 +1,139 @@
+name: Deploy to exe.dev
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Build all packages
+        run: bun run build
+
+      - name: Stage deploy payload
+        run: |
+          set -euo pipefail
+          mkdir -p _deploy/scripts
+          mkdir -p _deploy/packages/core
+          mkdir -p _deploy/packages/adapter-claude
+          mkdir -p _deploy/packages/server/src/db
+          mkdir -p _deploy/packages/web
+
+          cp -r packages/core/dist                       _deploy/packages/core/dist
+          cp    packages/core/package.json               _deploy/packages/core/package.json
+
+          cp -r packages/adapter-claude/dist             _deploy/packages/adapter-claude/dist
+          cp    packages/adapter-claude/package.json     _deploy/packages/adapter-claude/package.json
+
+          cp -r packages/server/dist                     _deploy/packages/server/dist
+          cp    packages/server/package.json             _deploy/packages/server/package.json
+          # Migrations are loaded by dist/src/db/migrate.js from a sibling
+          # 'migrations' dir; deploy.sh mirrors src/db/migrations/ into the
+          # dist tree at deploy time. We ship the SQL files at the canonical
+          # source path so the VM has a single authoritative copy.
+          cp -r packages/server/src/db/migrations        _deploy/packages/server/src/db/migrations
+
+          cp -r packages/web/dist                        _deploy/packages/web/dist
+          cp    packages/web/package.json                _deploy/packages/web/package.json
+
+          cp    scripts/deploy.sh                        _deploy/scripts/deploy.sh
+          chmod +x                                       _deploy/scripts/deploy.sh
+
+          cp    package.json bun.lock turbo.json         _deploy/
+
+          echo "Staged payload size:"
+          du -sh _deploy
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Rsync payload to VM
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          rsync -az --delete \
+            --exclude='.env' \
+            --exclude='node_modules' \
+            -e "ssh -o StrictHostKeyChecking=yes -o BatchMode=yes" \
+            _deploy/ "$SSH_USER@$SSH_HOST:~/claude-sessions/"
+
+      - name: Invoke deploy.sh on VM
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -o StrictHostKeyChecking=yes -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" \
+            "DEPLOY_SHA='${GITHUB_SHA}' bash -lc '~/claude-sessions/scripts/deploy.sh'"
+
+      - name: Public health check
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          PUBLIC_URL="https://${SSH_HOST}"
+          echo "Probing ${PUBLIC_URL}/api/health"
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 5 "${PUBLIC_URL}/api/health" | tee /tmp/health.out | grep -q '"ok"'; then
+              echo "Public health OK after ${i} attempts."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Public health check failed. Last response:"
+          cat /tmp/health.out 2>/dev/null || true
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy ${GITHUB_SHA::7}"
+            echo ""
+            echo "- Status: ${{ job.status }}"
+            echo "- Target: \`${{ secrets.SSH_HOST }}\`"
+            echo "- Trigger: \`${{ github.event_name }}\` by \`${{ github.actor }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Failure hint
+        if: failure()
+        run: |
+          echo "::error::Deploy failed for ${GITHUB_SHA::7}. SSH into the VM and run 'pm2 logs claude-sessions-api --lines 100' to investigate."
