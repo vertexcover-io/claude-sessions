@@ -2,13 +2,13 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { and, eq, gte, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { verifyToken } from "../auth/jwt.js";
 import type { DbClient } from "../db/client.js";
-import type { Env } from "../env.js";
-import { and, eq, gte, sql } from "drizzle-orm";
 import { sessions, summarizationRuns } from "../db/schema.js";
+import type { Env } from "../env.js";
 import { searchInternal } from "../lib/search-internal.js";
 import {
   findSessionsForPr,
@@ -104,7 +104,9 @@ const buildMcpServer = (db: DbClient, userId: string): McpServer => {
           cache_read_tokens: sql<string>`coalesce(sum(${summarizationRuns.cacheReadTokens}), 0)::text`,
           total_cost_usd: sql<string>`coalesce(sum(${summarizationRuns.totalCostUsd}), 0)::text`,
           avg_duration_ms: sql<number | null>`avg(${summarizationRuns.durationMs})::int`,
-          p95_duration_ms: sql<number | null>`percentile_cont(0.95) within group (order by ${summarizationRuns.durationMs})::int`,
+          p95_duration_ms: sql<
+            number | null
+          >`percentile_cont(0.95) within group (order by ${summarizationRuns.durationMs})::int`,
         })
         .from(summarizationRuns)
         .innerJoin(sessions, eq(sessions.id, summarizationRuns.sessionId))
