@@ -43,6 +43,13 @@ jobs:
           mkdir -p _deploy/packages/adapter-claude
           mkdir -p _deploy/packages/server/src/db
           mkdir -p _deploy/packages/web
+          # Ship empty package dirs for workspaces we don't deploy so the
+          # root package.json's `workspaces: ["packages/*"]` glob still
+          # resolves on the VM. Without this, bun install --frozen-lockfile
+          # reports "lockfile had changes" because the lockfile references
+          # workspaces (cli, test-config) that aren't on disk.
+          mkdir -p _deploy/packages/cli
+          mkdir -p _deploy/packages/test-config
 
           cp -r packages/core/dist                       _deploy/packages/core/dist
           cp    packages/core/package.json               _deploy/packages/core/package.json
@@ -60,6 +67,10 @@ jobs:
 
           cp -r packages/web/dist                        _deploy/packages/web/dist
           cp    packages/web/package.json                _deploy/packages/web/package.json
+
+          # Workspace manifests only (no dist) for non-deployed packages.
+          cp    packages/cli/package.json                _deploy/packages/cli/package.json
+          cp    packages/test-config/package.json        _deploy/packages/test-config/package.json
 
           cp    scripts/deploy.sh                        _deploy/scripts/deploy.sh
           cp    scripts/Caddyfile.template               _deploy/scripts/Caddyfile.template
