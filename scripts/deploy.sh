@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # VM-side deploy script for claude-sessions.
 # Invoked by .github/workflows/deploy.yml over SSH after rsyncing fresh dist/ artifacts.
-# Fully idempotent: bootstraps Node, pm2, Docker-managed Postgres, and Caddy on first run.
+# Fully idempotent: bootstraps Node, pm2, and Docker-managed Postgres on first run.
+# TLS + edge proxy are provided by exe.dev; the app listens on 127.0.0.1:3000.
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-$HOME/claude-sessions}"
@@ -30,25 +31,13 @@ if ! command -v pm2 >/dev/null 2>&1; then
     pm2 startup systemd -u "$USER" --hp "$HOME" || true
 fi
 
-# 0d. Bootstrap bun if missing (used for workspace-aware production install).
+# 0c. Bootstrap bun if missing (used for workspace-aware install).
 # Pin to the version used in CI so the lockfile format matches exactly.
 BUN_VERSION="${BUN_VERSION:-1.2.19}"
 export PATH="$HOME/.bun/bin:$PATH"
 if ! command -v bun >/dev/null 2>&1 || [ "$(bun --version 2>/dev/null)" != "$BUN_VERSION" ]; then
   log "Installing bun v$BUN_VERSION"
   curl -fsSL https://bun.sh/install | bash -s "bun-v$BUN_VERSION"
-fi
-
-# 0c. Bootstrap Caddy if missing (provides TLS for the public hostname).
-if ! command -v caddy >/dev/null 2>&1; then
-  log "caddy not found; installing official Caddy package"
-  sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-    | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-  curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-    | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
-  sudo apt-get update -y
-  sudo apt-get install -y caddy
 fi
 
 # 1. Sanity: .env exists and is 0600.
@@ -64,7 +53,6 @@ required_paths=(
   "packages/server/src/db/migrations"
   "packages/web/dist/index.html"
   "docker-compose.prod.yml"
-  "scripts/Caddyfile.template"
 )
 for p in "${required_paths[@]}"; do
   [ -e "$p" ] || die "missing required artifact: $p (rsync incomplete?)"
@@ -77,7 +65,6 @@ set -a
 set +a
 
 : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}"
-: "${PUBLIC_DOMAIN:?PUBLIC_DOMAIN must be set in .env (e.g. chitta.exe.xyz)}"
 
 # 4. Start (or ensure-running) Postgres via docker compose.
 log "Ensuring Postgres container is up"
@@ -94,21 +81,11 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# 5. Render Caddyfile and reload Caddy.
-log "Rendering Caddyfile for $PUBLIC_DOMAIN"
-sudo sed "s/__DOMAIN__/$PUBLIC_DOMAIN/g" scripts/Caddyfile.template \
-  | sudo tee /etc/caddy/Caddyfile >/dev/null
-sudo systemctl enable --now caddy
-sudo systemctl reload caddy || sudo systemctl restart caddy
-
-# 6a. Install deps so compiled JS can resolve node_modules.
-# Note: --production is intentionally omitted. bun 1.2.x flags it as a
-# lockfile change under workspaces, even when the lock is unchanged.
-# Dev deps are harmless on the VM (we only run `node dist/...`).
+# 5. Install deps so compiled JS can resolve node_modules.
 log "Installing dependencies via bun"
 bun install --frozen-lockfile
 
-# 6b. Mirror migrations into dist for the compiled migrate.js.
+# 6. Mirror migrations into dist for the compiled migrate.js.
 mkdir -p packages/server/dist/src/db/migrations
 cp -f packages/server/src/db/migrations/*.sql packages/server/dist/src/db/migrations/
 

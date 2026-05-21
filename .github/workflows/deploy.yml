@@ -73,7 +73,6 @@ jobs:
           cp    packages/test-config/package.json        _deploy/packages/test-config/package.json
 
           cp    scripts/deploy.sh                        _deploy/scripts/deploy.sh
-          cp    scripts/Caddyfile.template               _deploy/scripts/Caddyfile.template
           chmod +x                                       _deploy/scripts/deploy.sh
 
           cp    docker-compose.prod.yml                  _deploy/docker-compose.prod.yml
@@ -124,11 +123,9 @@ jobs:
           : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD secret is required}"
           PG_USER="${POSTGRES_USER:-postgres}"
           PG_DB="${POSTGRES_DB:-claude_sessions}"
-          PUBLIC_DOMAIN="$SSH_HOST"
           umask 077
           tmp_env=$(mktemp)
           {
-            printf 'PUBLIC_DOMAIN=%s\n' "$PUBLIC_DOMAIN"
             printf 'POSTGRES_USER=%s\n' "$PG_USER"
             printf 'POSTGRES_PASSWORD=%s\n' "$POSTGRES_PASSWORD"
             printf 'POSTGRES_DB=%s\n' "$PG_DB"
@@ -156,21 +153,24 @@ jobs:
             "$SSH_USER@$SSH_HOST" \
             "DEPLOY_SHA='${GITHUB_SHA}' bash -lc '~/claude-sessions/scripts/deploy.sh'"
 
-      - name: Public health check
+      - name: Local health check via SSH
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
-          PUBLIC_URL="https://${SSH_HOST}"
-          echo "Probing ${PUBLIC_URL}/api/health"
+          echo "Probing http://127.0.0.1:3000/api/health on $SSH_HOST"
           for i in $(seq 1 30); do
-            if curl -fsS --max-time 5 "${PUBLIC_URL}/api/health" | tee /tmp/health.out | grep -q '"ok"'; then
-              echo "Public health OK after ${i} attempts."
+            if ssh -o StrictHostKeyChecking=yes -o BatchMode=yes \
+                "$SSH_USER@$SSH_HOST" \
+                'curl -fsS --max-time 3 http://127.0.0.1:3000/api/health' \
+                | tee /tmp/health.out | grep -q '"ok"'; then
+              echo "Health OK after ${i} attempts."
               exit 0
             fi
             sleep 2
           done
-          echo "Public health check failed. Last response:"
+          echo "Health check failed. Last response:"
           cat /tmp/health.out 2>/dev/null || true
           exit 1
 
