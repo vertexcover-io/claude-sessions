@@ -93,14 +93,16 @@ cp -f packages/server/src/db/migrations/*.sql packages/server/dist/src/db/migrat
 log "Running migrations..."
 ( cd packages/server && node dist/src/db/migrate.js )
 
-# 8. Start (first deploy) or restart (subsequent) pm2 process.
+# 8. (Re)start pm2 process with fresh env.
+# pm2's daemon caches env, so `restart --update-env` is not enough when
+# .env keys are added or changed. Delete + start is the only reliable way
+# to guarantee the new process sees the current .env.
 if pm2 describe "$PM2_PROCESS" >/dev/null 2>&1; then
-  log "Restarting pm2 process: $PM2_PROCESS"
-  pm2 restart "$PM2_PROCESS" --update-env
-else
-  log "First-time start of pm2 process: $PM2_PROCESS"
-  ( cd packages/server && pm2 start dist/src/main.js --name "$PM2_PROCESS" --update-env )
+  log "Deleting existing pm2 process before fresh start: $PM2_PROCESS"
+  pm2 delete "$PM2_PROCESS"
 fi
+log "Starting pm2 process: $PM2_PROCESS"
+( cd packages/server && pm2 start dist/src/main.js --name "$PM2_PROCESS" --update-env )
 pm2 save >/dev/null
 
 # 9. Local health probe.

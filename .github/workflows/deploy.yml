@@ -136,6 +136,7 @@ jobs:
             printf 'PORT=%s\n' "${PORT:-3000}"
             printf 'NODE_ENV=production\n'
             printf 'COOKIE_SECURE=true\n'
+            printf 'WEB_DIST=/home/%s/claude-sessions/packages/web/dist\n' "$SSH_USER"
           } > "$tmp_env"
           scp -o StrictHostKeyChecking=yes -o BatchMode=yes \
             "$tmp_env" "$SSH_USER@$SSH_HOST:~/claude-sessions/.env"
