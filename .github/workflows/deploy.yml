@@ -62,8 +62,10 @@ jobs:
           cp    packages/web/package.json                _deploy/packages/web/package.json
 
           cp    scripts/deploy.sh                        _deploy/scripts/deploy.sh
+          cp    scripts/Caddyfile.template               _deploy/scripts/Caddyfile.template
           chmod +x                                       _deploy/scripts/deploy.sh
 
+          cp    docker-compose.prod.yml                  _deploy/docker-compose.prod.yml
           cp    package.json bun.lock turbo.json         _deploy/
 
           echo "Staged payload size:"
@@ -93,6 +95,45 @@ jobs:
             --exclude='node_modules' \
             -e "ssh -o StrictHostKeyChecking=yes -o BatchMode=yes" \
             _deploy/ "$SSH_USER@$SSH_HOST:~/claude-sessions/"
+
+      - name: Render .env on VM from secrets
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          EMBED_PROVIDER: ${{ secrets.EMBED_PROVIDER }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          PORT: ${{ secrets.PORT }}
+        run: |
+          set -euo pipefail
+          : "${JWT_SECRET:?JWT_SECRET secret is required}"
+          : "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD secret is required}"
+          PG_USER="${POSTGRES_USER:-postgres}"
+          PG_DB="${POSTGRES_DB:-claude_sessions}"
+          PUBLIC_DOMAIN="$SSH_HOST"
+          umask 077
+          tmp_env=$(mktemp)
+          {
+            printf 'PUBLIC_DOMAIN=%s\n' "$PUBLIC_DOMAIN"
+            printf 'POSTGRES_USER=%s\n' "$PG_USER"
+            printf 'POSTGRES_PASSWORD=%s\n' "$POSTGRES_PASSWORD"
+            printf 'POSTGRES_DB=%s\n' "$PG_DB"
+            printf 'DATABASE_URL=postgres://%s:%s@127.0.0.1:5433/%s\n' "$PG_USER" "$POSTGRES_PASSWORD" "$PG_DB"
+            printf 'JWT_SECRET=%s\n' "$JWT_SECRET"
+            printf 'EMBED_PROVIDER=%s\n' "${EMBED_PROVIDER:-fake}"
+            [ -n "${OPENAI_API_KEY:-}" ] && printf 'OPENAI_API_KEY=%s\n' "$OPENAI_API_KEY"
+            printf 'PORT=%s\n' "${PORT:-3000}"
+            printf 'NODE_ENV=production\n'
+            printf 'COOKIE_SECURE=true\n'
+          } > "$tmp_env"
+          scp -o StrictHostKeyChecking=yes -o BatchMode=yes \
+            "$tmp_env" "$SSH_USER@$SSH_HOST:~/claude-sessions/.env"
+          ssh -o StrictHostKeyChecking=yes -o BatchMode=yes \
+            "$SSH_USER@$SSH_HOST" 'chmod 600 ~/claude-sessions/.env'
+          rm -f "$tmp_env"
 
       - name: Invoke deploy.sh on VM
         env:
