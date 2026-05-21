@@ -31,11 +31,13 @@ if ! command -v pm2 >/dev/null 2>&1; then
 fi
 
 # 0d. Bootstrap bun if missing (used for workspace-aware production install).
-if ! command -v bun >/dev/null 2>&1; then
-  log "bun not found; installing"
-  curl -fsSL https://bun.sh/install | bash
-fi
+# Pin to the version used in CI so the lockfile format matches exactly.
+BUN_VERSION="${BUN_VERSION:-1.2.19}"
 export PATH="$HOME/.bun/bin:$PATH"
+if ! command -v bun >/dev/null 2>&1 || [ "$(bun --version 2>/dev/null)" != "$BUN_VERSION" ]; then
+  log "Installing bun v$BUN_VERSION"
+  curl -fsSL https://bun.sh/install | bash -s "bun-v$BUN_VERSION"
+fi
 
 # 0c. Bootstrap Caddy if missing (provides TLS for the public hostname).
 if ! command -v caddy >/dev/null 2>&1; then
