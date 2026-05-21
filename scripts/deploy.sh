@@ -30,6 +30,13 @@ if ! command -v pm2 >/dev/null 2>&1; then
     pm2 startup systemd -u "$USER" --hp "$HOME" || true
 fi
 
+# 0d. Bootstrap bun if missing (used for workspace-aware production install).
+if ! command -v bun >/dev/null 2>&1; then
+  log "bun not found; installing"
+  curl -fsSL https://bun.sh/install | bash
+fi
+export PATH="$HOME/.bun/bin:$PATH"
+
 # 0c. Bootstrap Caddy if missing (provides TLS for the public hostname).
 if ! command -v caddy >/dev/null 2>&1; then
   log "caddy not found; installing official Caddy package"
@@ -92,7 +99,11 @@ sudo sed "s/__DOMAIN__/$PUBLIC_DOMAIN/g" scripts/Caddyfile.template \
 sudo systemctl enable --now caddy
 sudo systemctl reload caddy || sudo systemctl restart caddy
 
-# 6. Mirror migrations into dist for the compiled migrate.js.
+# 6a. Install production deps so compiled JS can resolve node_modules.
+log "Installing production dependencies via bun"
+bun install --frozen-lockfile --production
+
+# 6b. Mirror migrations into dist for the compiled migrate.js.
 mkdir -p packages/server/dist/src/db/migrations
 cp -f packages/server/src/db/migrations/*.sql packages/server/dist/src/db/migrations/
 
