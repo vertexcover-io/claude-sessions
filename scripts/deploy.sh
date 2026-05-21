@@ -101,9 +101,12 @@ sudo sed "s/__DOMAIN__/$PUBLIC_DOMAIN/g" scripts/Caddyfile.template \
 sudo systemctl enable --now caddy
 sudo systemctl reload caddy || sudo systemctl restart caddy
 
-# 6a. Install production deps so compiled JS can resolve node_modules.
-log "Installing production dependencies via bun"
-bun install --frozen-lockfile --production
+# 6a. Install deps so compiled JS can resolve node_modules.
+# Note: --production is intentionally omitted. bun 1.2.x flags it as a
+# lockfile change under workspaces, even when the lock is unchanged.
+# Dev deps are harmless on the VM (we only run `node dist/...`).
+log "Installing dependencies via bun"
+bun install --frozen-lockfile
 
 # 6b. Mirror migrations into dist for the compiled migrate.js.
 mkdir -p packages/server/dist/src/db/migrations
