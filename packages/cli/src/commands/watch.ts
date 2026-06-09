@@ -4,6 +4,13 @@ import { Summarizer } from "../summarizer/index.js";
 import type { UploadClient } from "../upload/client.js";
 import { JsonlWatcher } from "../watcher/chokidar.js";
 
+/**
+ * Master kill-switch for summary generation. Temporarily disabled — the
+ * Summarizer pipeline and all its code are kept intact; flip this back to
+ * `true` to re-enable end-of-session summarization.
+ */
+const SUMMARIZATION_ENABLED = false;
+
 export interface WatchOptions {
   client: UploadClient;
   /** Disable summarization (tests). */
@@ -15,7 +22,8 @@ export interface WatchOptions {
  * until SIGINT / SIGTERM, then closes the watcher cleanly.
  */
 export const watchCommand = async (opts: WatchOptions): Promise<number> => {
-  const summarizer = opts.disableSummarizer ? undefined : new Summarizer({ upload: opts.client });
+  const summarizationOff = !SUMMARIZATION_ENABLED || opts.disableSummarizer;
+  const summarizer = summarizationOff ? undefined : new Summarizer({ upload: opts.client });
   const watcher = new JsonlWatcher({
     client: opts.client,
     ...(summarizer ? { summarizer } : {}),
