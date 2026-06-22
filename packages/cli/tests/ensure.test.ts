@@ -53,6 +53,32 @@ describe("ensure command", () => {
     expect(json.hookSpecificOutput.additionalContext).toContain("login");
   });
 
+  it("credentials for a non-localhost server → auth recognized despite --server default", async () => {
+    // Reproduces the SessionStart-hook bug: the hook runs `claude-sessions ensure`
+    // with the hardcoded localhost default, but the user is paired with a remote
+    // server. ensure must honor the stored credentials' server_url, not localhost.
+    const remote = "https://chitta.exe.xyz";
+    await writeCredentials({ server_url: remote, token: "tok", user_email: "u@e.test" });
+    const repo = makeTempGitRepo("git@github.com:fixture/ensure-remote.git");
+    try {
+      const code = await ensureCommand({
+        serverUrl: SERVER, // localhost default baked into the hook
+        cwd: repo.path,
+        skipDaemon: true,
+        stdout,
+        stderr,
+        fetchImpl: okFetch,
+      });
+      expect(code).toBe(0);
+      const ctx = parseHookOutput().hookSpecificOutput.additionalContext;
+      // Authenticated path: prompts to enable the repo, NOT to log in.
+      expect(ctx).toContain("claude-sessions enable");
+      expect(ctx).not.toContain("not authenticated");
+    } finally {
+      repo.cleanup();
+    }
+  });
+
   it("authenticated + repo not enabled → additionalContext asks to enable", async () => {
     await writeCredentials({ server_url: SERVER, token: "tok", user_email: "u@e.test" });
     const repo = makeTempGitRepo("git@github.com:fixture/ensure-a.git");

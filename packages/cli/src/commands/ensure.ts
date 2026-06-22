@@ -2,6 +2,7 @@
 
 import { fileURLToPath } from "node:url";
 import { detectRepo } from "@claude-sessions/core";
+import { readCredentials } from "../config/credentials.js";
 import { isWatcherAlive, startWatcherDaemon, watchLogPath } from "../config/daemon.js";
 import { getRepo } from "../config/repos.js";
 import { ensureAuthenticated } from "./_pair.js";
@@ -45,7 +46,16 @@ const emitContext = (stdout: NodeJS.WritableStream, lines: string[]): void => {
  * exits 0, degrading to a warning when capture can't be turned on.
  */
 export const ensureCommand = async (opts: EnsureOptions = {}): Promise<number> => {
-  const serverUrl = (opts.serverUrl ?? DEFAULT_SERVER_URL).replace(/\/+$/, "");
+  // Prefer the server the user is actually paired with. The hook installs a
+  // bare `claude-sessions ensure`, so opts.serverUrl is just the localhost
+  // default — using it for the auth check would falsely report "not
+  // authenticated" for anyone paired with a remote server. Stored credentials
+  // are authoritative; fall back to the passed/default URL only when unpaired.
+  const stored = readCredentials();
+  const serverUrl = (stored?.server_url ?? opts.serverUrl ?? DEFAULT_SERVER_URL).replace(
+    /\/+$/,
+    "",
+  );
   const cwd = opts.cwd ?? process.cwd();
   const stdout = opts.stdout ?? process.stdout;
   const stderr = opts.stderr ?? process.stderr;
