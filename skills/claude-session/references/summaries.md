@@ -40,9 +40,34 @@ non-zero exit and uploads nothing.
 Fire it when you've completed a meaningful unit of work or are wrapping up. It's
 safe to run more than once — re-running updates the summary in place.
 
+## How you get prompted
+
+A `Stop` hook (installed by `claude-sessions install-hooks`) nudges you to
+author a summary before a substantive session ends: it returns a `block`
+decision asking you to run `summarize --current --from-agent`. Once you've
+pushed a fresh summary, the hook lets the session stop. There is no
+timer-based / daemon summarization.
+
+## Provisional first-prompt title
+
+A `UserPromptSubmit` hook nudges you, on the **first prompt** of a new session,
+to give it a readable title right away (instead of `Session <id>` in the
+dashboard). When prompted, run — as your first action, before the task —
+`summarize --current --from-agent --provisional` with a short title + one-line
+summary derived only from the user's request:
+
+```
+echo '{"title":"Add login form","summary":"User asked to add a login form.","tags":["auth"],"files_touched":[],"prs_referenced":[]}' \
+  | claude-sessions summarize --current --from-agent --provisional
+```
+
+`--provisional` stamps the summary `model=heuristic` so it's never treated as
+final — the full `Stop`-hook summary you author later supersedes it. It's quick
+and only needs doing once per session.
+
 ## Fallback
 
-If you never push a summary, the watcher daemon detects end-of-session and
-generates one with `claude -p` (backfill-only: it skips any session that already
-has a summary, so your agent-authored summary is never overwritten). Set
-`CLAUDE_SESSIONS_SUMMARIZE=0` to disable the fallback entirely.
+`claude -p` is a manual last resort, not automatic. If a session ends with no
+agent-authored summary, generate one on demand with `summarize <id>` or
+`summarize --all` (these invoke `claude -p`). The watcher never summarizes on
+its own.

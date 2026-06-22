@@ -169,4 +169,45 @@ describe("summarizeAndUpload pipeline (e2e with mocked claude)", () => {
     expect(runReqs).toHaveLength(1);
     expect((runReqs[0]?.body as { claude_model: string }).claude_model).toBe("agent");
   });
+
+  it("provisional: stamps the agent summary model=heuristic", async () => {
+    const path = join(dir, "session-prov-1.jsonl");
+    const events = [
+      {
+        type: "user",
+        uuid: "u1",
+        parentUuid: null,
+        timestamp: "2026-05-09T10:00:00.000Z",
+        sessionId: "session-prov-1",
+        cwd: "/tmp/work",
+        version: "1.0.0",
+        message: { role: "user", content: "add a login form" },
+      },
+    ];
+    writeFileSync(path, `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
+
+    const client = new UploadClient({ serverUrl: server.url, token: "tok" });
+    const result = await summarizeAndUpload("session-prov-1", {
+      upload: client,
+      jsonlPath: path,
+      provisional: true,
+      providedSummary: {
+        title: "Add a login form",
+        summary: "User asked to add a login form.",
+        tags: ["auth"],
+        files_touched: [],
+        prs_referenced: [],
+      },
+      runClaudeImpl: () =>
+        Promise.reject(new Error("claude must not run for provisional summaries")),
+      minePrsImpl: () => Promise.resolve([]),
+    });
+
+    expect(result.status).toBe("ok");
+    expect(result.model).toBe("heuristic");
+    expect(result.title).toBe("Add a login form");
+
+    const runReqs = server.requests.filter((r) => r.path.endsWith("/summarization-runs"));
+    expect((runReqs[0]?.body as { claude_model: string }).claude_model).toBe("heuristic");
+  });
 });

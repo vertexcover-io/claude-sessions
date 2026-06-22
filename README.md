@@ -67,6 +67,36 @@ bun run --filter @claude-sessions/web dev    # vite at :5173, proxies /api to :3
 
 ## Quickstart — CLI
 
+### One-line install (recommended)
+
+Clones this repo, builds the CLI, puts `claude-sessions` on your PATH, installs the
+`claude-session` skill, and wires the Claude Code hooks. Needs `git`, `bun`, and
+`node` 22+.
+
+```sh
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/vertexcover-io/claude-sessions/main/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/vertexcover-io/claude-sessions/main/install.ps1 | iex
+```
+
+The clone lives at `~/.local/share/claude-sessions` (`%LOCALAPPDATA%\claude-sessions`
+on Windows) and is the permanent install source — re-running the command updates and
+rebuilds it. Override the ref/location with `CLAUDE_SESSIONS_REF` / `CLAUDE_SESSIONS_SRC`.
+From inside a checkout, run `./install.sh` (or `.\install.ps1`) directly to build in place.
+
+Then point the CLI at a server and enable a repo:
+
+```sh
+claude-sessions login --server http://localhost:3000
+claude-sessions enable .
+```
+
+### Manual build
+
 ```sh
 bun run --filter @claude-sessions/cli build
 node packages/cli/dist/main.js login \

@@ -28,6 +28,8 @@ export interface SummarizeCommandOpts {
   yes?: boolean;
   /** Read an agent-authored summary (JSON) from stdin instead of running `claude -p`. */
   fromAgent?: boolean;
+  /** Mark the agent summary as a provisional first-prompt title (model=heuristic). */
+  provisional?: boolean;
   /** Target the active session for the current working directory. */
   current?: boolean;
   summarizerFactory?: (client: UploadClient) => Pick<Summarizer, "summarize">;
@@ -169,6 +171,7 @@ export const summarizeCommand = async (opts: SummarizeCommandOpts): Promise<numb
   const wantCurrent = opts.current === true;
   const wantAll = opts.all === true;
   const fromAgent = opts.fromAgent === true;
+  const provisional = opts.provisional === true;
 
   // Exactly one of <session-id> / --current / --all.
   if ([hasId, wantCurrent, wantAll].filter(Boolean).length !== 1) {
@@ -177,6 +180,10 @@ export const summarizeCommand = async (opts: SummarizeCommandOpts): Promise<numb
   }
   if (fromAgent && wantAll) {
     stderr.write("--from-agent requires a single session (use <session-id> or --current)\n");
+    return 2;
+  }
+  if (provisional && !fromAgent) {
+    stderr.write("--provisional requires --from-agent\n");
     return 2;
   }
 
@@ -220,6 +227,7 @@ export const summarizeCommand = async (opts: SummarizeCommandOpts): Promise<numb
       await summarizer.summarize(single.session_id, single.path, {
         force: opts.force === true,
         ...(providedSummary ? { providedSummary } : {}),
+        ...(provisional ? { provisional: true } : {}),
       });
       return 0;
     } catch (err) {

@@ -16,25 +16,37 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-const read = (): Record<string, never> => JSON.parse(readFileSync(settingsPath, "utf8"));
-const commands = (s: {
-  hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
-}) => (s.hooks?.SessionStart ?? []).flatMap((m) => (m.hooks ?? []).map((h) => h.command));
+type Settings = {
+  hooks?: Record<string, Array<{ hooks?: Array<{ command?: string }> }>>;
+} & Record<string, unknown>;
+
+const read = (): Settings => JSON.parse(readFileSync(settingsPath, "utf8"));
+const commands = (s: Settings, event: string): (string | undefined)[] =>
+  (s.hooks?.[event] ?? []).flatMap((m) => (m.hooks ?? []).map((h) => h.command));
 
 describe("install-hooks", () => {
-  it("creates settings.json with the SessionStart hook", () => {
+  it("creates settings.json with the SessionStart, UserPromptSubmit and Stop hooks", () => {
     const code = installHooksCommand({ settingsPath, stdout: sink, stderr: sink });
     expect(code).toBe(0);
-    expect(commands(read())).toContain("claude-sessions ensure");
+    expect(commands(read(), "SessionStart")).toContain("claude-sessions ensure");
+    expect(commands(read(), "UserPromptSubmit")).toContain("claude-sessions prompt-hook");
+    expect(commands(read(), "Stop")).toContain("claude-sessions stop-hook");
   });
 
   it("is idempotent — no duplicate entries on re-run", () => {
     installHooksCommand({ settingsPath, stdout: sink, stderr: sink });
     installHooksCommand({ settingsPath, stdout: sink, stderr: sink });
-    expect(commands(read()).filter((c) => c === "claude-sessions ensure")).toHaveLength(1);
+    const s = read();
+    expect(commands(s, "SessionStart").filter((c) => c === "claude-sessions ensure")).toHaveLength(
+      1,
+    );
+    expect(
+      commands(s, "UserPromptSubmit").filter((c) => c === "claude-sessions prompt-hook"),
+    ).toHaveLength(1);
+    expect(commands(s, "Stop").filter((c) => c === "claude-sessions stop-hook")).toHaveLength(1);
   });
 
-  it("preserves unrelated keys and existing hooks", () => {
+  it("preserves unrelated keys and a pre-existing Stop hook", () => {
     writeFileSync(
       settingsPath,
       JSON.stringify({
@@ -43,29 +55,37 @@ describe("install-hooks", () => {
       }),
     );
     installHooksCommand({ settingsPath, stdout: sink, stderr: sink });
-    const s = read() as Record<string, unknown>;
+    const s = read();
     expect(s.model).toBe("opus");
-    expect((s.hooks as { Stop: unknown[] }).Stop).toHaveLength(1);
-    expect(commands(s as never)).toContain("claude-sessions ensure");
+    // Our Stop hook is appended alongside the user's existing one.
+    expect(commands(s, "Stop")).toContain("echo hi");
+    expect(commands(s, "Stop")).toContain("claude-sessions stop-hook");
+    expect(commands(s, "SessionStart")).toContain("claude-sessions ensure");
   });
 
-  it("uninstall removes only our entry, keeping others", () => {
+  it("uninstall removes only our entries, keeping others", () => {
     writeFileSync(
       settingsPath,
       JSON.stringify({
-        hooks: { SessionStart: [{ hooks: [{ type: "command", command: "other" }] }] },
+        hooks: {
+          SessionStart: [{ hooks: [{ type: "command", command: "other" }] }],
+          Stop: [{ hooks: [{ type: "command", command: "echo hi" }] }],
+        },
       }),
     );
     installHooksCommand({ settingsPath, stdout: sink, stderr: sink });
     uninstallHooksCommand({ settingsPath, stdout: sink, stderr: sink });
-    const cmds = commands(read());
-    expect(cmds).toContain("other");
-    expect(cmds).not.toContain("claude-sessions ensure");
+    const s = read();
+    expect(commands(s, "SessionStart")).toContain("other");
+    expect(commands(s, "SessionStart")).not.toContain("claude-sessions ensure");
+    expect(commands(s, "Stop")).toContain("echo hi");
+    expect(commands(s, "Stop")).not.toContain("claude-sessions stop-hook");
+    expect(commands(s, "UserPromptSubmit")).not.toContain("claude-sessions prompt-hook");
   });
 
   it("uninstall drops the hooks key entirely when nothing else remains", () => {
     installHooksCommand({ settingsPath, stdout: sink, stderr: sink });
     uninstallHooksCommand({ settingsPath, stdout: sink, stderr: sink });
-    expect((read() as Record<string, unknown>).hooks).toBeUndefined();
+    expect(read().hooks).toBeUndefined();
   });
 });

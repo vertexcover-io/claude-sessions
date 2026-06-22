@@ -63,6 +63,7 @@ export interface SessionDetailSummary {
   tool_call_counts: Record<string, number>;
   status: "pending" | "ok" | "failed";
   summarized_event_count?: number | null;
+  model?: string | null;
 }
 
 export interface SessionDetail {

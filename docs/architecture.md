@@ -16,7 +16,7 @@
 |  ├── discover.ts              walk ~/.claude/projects/* for JSONL    |
 |  ├── watcher/                 chokidar tail, dedupe via byte offset, |
 |  │                            consume → ingest → advance offset      |
-|  ├── summarizer/              claude -p runner, end-detect, prompt,  |
+|  ├── summarizer/              claude -p runner, watermark, prompt,   |
 |  │                            deterministic stats, PR mining,        |
 |  │                            global concurrency cap (2)             |
 |  └── upload/client.ts         bearer-auth fetch wrapper, retry       |
@@ -80,8 +80,8 @@ JSONL append
 ### 2. Summarize
 
 ```
-end-detect timer fires after 60s of silence on a sessionId
-  → Summarizer.summarize(sessionId, jsonlPath)
+agent runs `summarize --current --from-agent` (Stop hook prompts it)
+  → Summarizer.summarize(sessionId, jsonlPath, { providedSummary })
   → semaphore acquire (cap=2 globally)
   → pipeline:
       runClaude(prompt) → JSON summary { title, summary, tags, files_touched }
@@ -157,9 +157,13 @@ Claude Code → /mcp/:token (Streamable HTTP)
 2. CLI watcher (already running) sees `add`/`change`
 3. consumeFile streams new bytes → POST /api/ingest
 4. for every batch: server upserts sessions row, inserts events
-5. claude session ends; user closes terminal
-6. 60s of silence → SessionEndDetector fires
-7. summarizer runs claude -p on the JSONL → JSON summary
+4b. on the first prompt, the UserPromptSubmit hook (`prompt-hook`) injects a
+    one-time nudge → the agent runs `summarize --current --from-agent
+    --provisional`, giving the session a readable title right away
+    (model="heuristic", later superseded)
+5. before the turn ends, the Stop hook prompts the agent to summarize
+6. agent runs `summarize --current --from-agent` (claude -p is a manual fallback)
+7. CLI merges deterministic facts onto the agent's narrative → JSON summary
 8. POST /api/sessions/:id/summary → server stores summary + embedding
 9. (optional) PUT /api/sessions/:id/blob → raw NDJSON for fork support
 10. session is now searchable in web UI, MCP, REST search endpoint

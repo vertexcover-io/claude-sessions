@@ -207,6 +207,26 @@ describe("POST /api/sessions/:id/summary", () => {
     expect(json.summary?.summarized_event_count).toBe(42);
   });
 
+  it("round-trips summary model (e.g. provisional heuristic) via POST and GET /:id", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "summ-model@example.test",
+      repoUrl: "github.com/example/summary-model",
+    });
+    const sessionId = "session-summary-model";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const body = buildSummaryBody(sessionId);
+    body.model = "heuristic";
+
+    const postRes = await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    expect(postRes.status).toBe(200);
+
+    const getRes = await get(`/api/sessions/${sessionId}`, seed.token);
+    expect(getRes.status).toBe(200);
+    const json = (await getRes.json()) as { summary: { model: string | null } | null };
+    expect(json.summary?.model).toBe("heuristic");
+  });
+
   it("REQ-007/REQ-014: omitting summarized_event_count yields null on GET", async () => {
     const seed = await seedUser(db.db, env.JWT_SECRET, {
       email: "summ-watermark-null@example.test",

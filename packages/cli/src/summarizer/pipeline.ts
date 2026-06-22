@@ -26,6 +26,12 @@ export interface PipelineDeps {
    * at the merge step. Deterministic fields are still computed and merged.
    */
   providedSummary?: LlmSummary;
+  /**
+   * Provisional first-prompt title: stamp the summary `model: "heuristic"`
+   * so the watermark treats it as never-fresh and a real agent summary
+   * always supersedes it. Implies `providedSummary`.
+   */
+  provisional?: boolean;
 }
 
 export interface LlmSummary {
@@ -129,7 +135,7 @@ export const summarizeAndUpload = async (
   const minePrsFn = deps.minePrsImpl ?? minePrs;
   const readBlobFn = deps.readBlob ?? (async (p: string) => new Uint8Array(await readFile(p)));
   const isAgent = deps.providedSummary !== undefined;
-  const model = deps.model ?? (isAgent ? "agent" : "sonnet");
+  const model = deps.model ?? (deps.provisional ? "heuristic" : isAgent ? "agent" : "sonnet");
   const attempt = deps.attempt ?? 1;
   const log = deps.recordLogger ?? ((m) => process.stderr.write(`${m}\n`));
 
