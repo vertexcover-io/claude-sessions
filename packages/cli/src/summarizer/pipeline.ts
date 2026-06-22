@@ -2,7 +2,13 @@
 
 import { readFile } from "node:fs/promises";
 import { readSessionSync } from "@claude-sessions/adapter-claude";
-import type { CanonicalSession, SessionSummary } from "@claude-sessions/core";
+import type {
+  AttributedTo,
+  CanonicalSession,
+  RootCause,
+  SessionLearning,
+  SessionSummary,
+} from "@claude-sessions/core";
 import type { SummarizationRunPayload, UploadClient } from "../upload/client.js";
 import type { ClaudeRunMeta } from "./claude-runner.js";
 import { runClaude } from "./claude-runner.js";
@@ -40,6 +46,7 @@ export interface LlmSummary {
   tags: string[];
   files_touched: string[];
   prs_referenced: string[];
+  learnings?: SessionLearning[];
 }
 
 const dedupe = <T>(arr: readonly T[]): T[] => Array.from(new Set(arr));
@@ -51,17 +58,81 @@ const ensureArray = (v: unknown): string[] => {
 
 const ensureString = (v: unknown, fallback = ""): string => (typeof v === "string" ? v : fallback);
 
+const ROOT_CAUSES: readonly RootCause[] = [
+  "underspecified_request",
+  "instruction_not_followed",
+  "missing_verification",
+  "task_derailment",
+  "context_loss",
+  "environment_or_tooling",
+];
+const ATTRIBUTED: readonly AttributedTo[] = ["user", "agent", "shared", "environment"];
+const SEVERITIES = ["low", "medium", "high"] as const;
+
+/**
+ * Parse + strictly validate the optional `learnings` array. Returns undefined
+ * when the field is absent (server leaves existing rows untouched); `[]` is a
+ * valid "clean session". Throws on any malformed entry so a bad agent payload
+ * fails loudly rather than silently dropping diagnoses. Evidence-anchored:
+ * every learning must cite ≥1 `episode_event_uuids`.
+ */
+const parseLearnings = (raw: unknown): SessionLearning[] | undefined => {
+  if (raw === undefined || raw === null) return undefined;
+  if (!Array.isArray(raw)) throw new Error("learnings: expected an array");
+  return raw.map((entry, i) => {
+    if (!entry || typeof entry !== "object") {
+      throw new Error(`learnings[${i}]: expected an object`);
+    }
+    const o = entry as Record<string, unknown>;
+    const uuids = ensureArray(o.episode_event_uuids);
+    if (uuids.length === 0) {
+      throw new Error(`learnings[${i}]: episode_event_uuids must cite at least one event`);
+    }
+    const title = ensureString(o.title).trim();
+    const wentWrong = ensureString(o.what_went_wrong).trim();
+    const prevented = ensureString(o.what_would_have_prevented).trim();
+    if (!title) throw new Error(`learnings[${i}]: missing \`title\``);
+    if (!wentWrong) throw new Error(`learnings[${i}]: missing \`what_went_wrong\``);
+    if (!prevented) throw new Error(`learnings[${i}]: missing \`what_would_have_prevented\``);
+    if (!ROOT_CAUSES.includes(o.root_cause as RootCause)) {
+      throw new Error(`learnings[${i}]: invalid \`root_cause\` ${String(o.root_cause)}`);
+    }
+    if (!ATTRIBUTED.includes(o.attributed_to as AttributedTo)) {
+      throw new Error(`learnings[${i}]: invalid \`attributed_to\` ${String(o.attributed_to)}`);
+    }
+    const confidence = typeof o.confidence === "number" ? o.confidence : Number.NaN;
+    if (!(confidence >= 0 && confidence <= 1)) {
+      throw new Error(`learnings[${i}]: \`confidence\` must be between 0 and 1`);
+    }
+    const learning: SessionLearning = {
+      title,
+      episode_event_uuids: uuids,
+      what_went_wrong: wentWrong,
+      what_would_have_prevented: prevented,
+      root_cause: o.root_cause as RootCause,
+      attributed_to: o.attributed_to as AttributedTo,
+      confidence,
+    };
+    if (SEVERITIES.includes(o.severity as (typeof SEVERITIES)[number])) {
+      learning.severity = o.severity as SessionLearning["severity"];
+    }
+    return learning;
+  });
+};
+
 const parseLlmOutput = (raw: unknown): LlmSummary => {
   if (!raw || typeof raw !== "object") {
     throw new Error("claude returned a non-object summary");
   }
   const o = raw as Record<string, unknown>;
+  const learnings = parseLearnings(o.learnings);
   return {
     title: ensureString(o.title),
     summary: ensureString(o.summary),
     tags: ensureArray(o.tags),
     files_touched: ensureArray(o.files_touched),
     prs_referenced: ensureArray(o.prs_referenced),
+    ...(learnings !== undefined ? { learnings } : {}),
   };
 };
 
@@ -222,6 +293,7 @@ export const summarizeAndUpload = async (
     model,
     status: "ok",
     summarized_event_count: session.events.length,
+    ...(llm.learnings !== undefined ? { learnings: llm.learnings } : {}),
   };
 
   await deps.upload.uploadSummary(sessionId, summary);

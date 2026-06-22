@@ -43,6 +43,21 @@ export interface SessionSummaryPayload {
   status: "pending" | "ok" | "failed";
 }
 
+export interface SessionLearning {
+  id: string;
+  title: string;
+  episode_event_uuids: string[];
+  what_went_wrong: string;
+  what_would_have_prevented: string;
+  root_cause: string;
+  attributed_to: string;
+  confidence: number;
+  severity: "low" | "medium" | "high" | null;
+  model: string | null;
+  generated_at: string | null;
+  summarized_event_count: number | null;
+}
+
 export interface SessionDetail {
   id: string;
   agent?: string;
@@ -63,6 +78,7 @@ export interface SessionDetail {
   has_blob?: boolean;
   display_name: string;
   summary: SessionSummaryPayload | null;
+  learnings?: SessionLearning[];
 }
 
 export type CanonicalEventType = "user_msg" | "assistant_msg" | "tool_use" | "summary" | "system";

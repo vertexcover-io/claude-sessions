@@ -1,11 +1,20 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { Activity, ArrowLeft, FileText, GitFork, MessageSquare, Wrench } from "lucide-react";
-import { useState } from "react";
+import {
+  Activity,
+  ArrowLeft,
+  FileText,
+  GitFork,
+  Lightbulb,
+  MessageSquare,
+  Wrench,
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ForkModal } from "../components/ForkModal";
 import { ArtifactsPanel } from "../components/transcript/ArtifactsPanel";
 import { CommitsPanel } from "../components/transcript/CommitsPanel";
+import { LearningsPanel } from "../components/transcript/LearningsPanel";
 import { StickyHeader } from "../components/transcript/StickyHeader";
 import { SummaryPanel } from "../components/transcript/SummaryPanel";
 import { TimelineView } from "../components/transcript/TimelineView";
@@ -20,7 +29,7 @@ import {
 } from "../lib/api";
 import { cn } from "../lib/cn";
 
-type Tab = "timeline" | "conversation" | "tools" | "artifacts";
+type Tab = "timeline" | "conversation" | "tools" | "artifacts" | "learnings";
 
 const TabButton = ({
   active,
@@ -55,6 +64,29 @@ export const SessionView = () => {
   const artifacts = useSessionArtifacts(id);
   const [forkOpen, setForkOpen] = useState(false);
   const [tab, setTab] = useState<Tab>("timeline");
+  const jumpTarget = useRef<string | null>(null);
+
+  // Deep-link from a learning's evidence into the transcript. The Timeline tab
+  // renders every event type (incl. tool failures) and is not virtualized, so
+  // the anchor element exists once it mounts. Scroll + flash after the switch.
+  useEffect(() => {
+    if (tab !== "timeline" || !jumpTarget.current) return;
+    const uuid = jumpTarget.current;
+    jumpTarget.current = null;
+    const raf = requestAnimationFrame(() => {
+      const el = document.getElementById(`evt-${uuid}`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("evt-flash");
+      setTimeout(() => el.classList.remove("evt-flash"), 1600);
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [tab]);
+
+  const handleJumpToEvent = useCallback((eventUuid: string) => {
+    jumpTarget.current = eventUuid;
+    setTab("timeline");
+  }, []);
 
   if (session.isLoading) {
     return <div className="p-8 text-center text-sm text-muted-foreground">Loading session…</div>;
@@ -65,6 +97,8 @@ export const SessionView = () => {
   const data = session.data;
   const toolCount = toolCalls.data?.tool_calls.length ?? 0;
   const artifactCount = artifacts.data?.artifacts.length ?? 0;
+  const learnings = data.learnings ?? [];
+  const learningCount = learnings.length;
 
   return (
     <div className="flex flex-col h-full" data-testid="session-view">
@@ -114,6 +148,12 @@ export const SessionView = () => {
             <span className="text-xs text-muted-foreground tabular-nums">{artifactCount}</span>
           )}
         </TabButton>
+        <TabButton active={tab === "learnings"} onClick={() => setTab("learnings")}>
+          <Lightbulb size={14} /> Learnings
+          {learningCount > 0 && (
+            <span className="text-xs text-muted-foreground tabular-nums">{learningCount}</span>
+          )}
+        </TabButton>
       </div>
 
       {tab === "timeline" && (
@@ -146,6 +186,12 @@ export const SessionView = () => {
       {tab === "artifacts" && id && (
         <div className="flex-1 overflow-auto">
           <ArtifactsPanel sessionId={id} />
+        </div>
+      )}
+
+      {tab === "learnings" && (
+        <div className="flex-1 overflow-auto">
+          <LearningsPanel learnings={learnings} onJumpToEvent={handleJumpToEvent} />
         </div>
       )}
 

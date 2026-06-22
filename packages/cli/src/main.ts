@@ -11,6 +11,7 @@ import { findCommand } from "./commands/find.js";
 import { forkCommand } from "./commands/fork.js";
 import { initCommand } from "./commands/init.js";
 import { installHooksCommand, uninstallHooksCommand } from "./commands/install-hooks.js";
+import { learningsCommand } from "./commands/learnings.js";
 import { loginCommand } from "./commands/login.js";
 import { logoutCommand } from "./commands/logout.js";
 import { logsCommand } from "./commands/logs.js";
@@ -274,6 +275,16 @@ const main = async (): Promise<void> => {
         process.exit(r.exit);
       },
     );
+
+  program
+    .command("learnings <session-id>")
+    .description("Show the per-session learnings (failure episodes) extracted for a session.")
+    .option("--json", "print the raw learning records as JSON", false)
+    .action(async (sessionId: string, opts: { json: boolean }) => {
+      const client = buildClient();
+      const code = await learningsCommand({ client, sessionId, json: opts.json });
+      process.exit(code);
+    });
 
   program
     .command("find <query...>")

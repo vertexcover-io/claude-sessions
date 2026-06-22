@@ -63,6 +63,7 @@ export const truncateAll = async (db: Db): Promise<void> => {
   await db.sql`TRUNCATE
     audit_log,
     artifacts,
+    learnings,
     session_pr_links,
     session_blobs,
     embeddings,

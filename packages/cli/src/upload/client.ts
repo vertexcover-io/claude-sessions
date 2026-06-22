@@ -66,9 +66,25 @@ export interface SessionDetailSummary {
   model?: string | null;
 }
 
+export interface LearningRecord {
+  id: string;
+  title: string;
+  episode_event_uuids: string[];
+  what_went_wrong: string;
+  what_would_have_prevented: string;
+  root_cause: string;
+  attributed_to: string;
+  confidence: number;
+  severity: "low" | "medium" | "high" | null;
+  model: string | null;
+  generated_at: string | null;
+  summarized_event_count: number | null;
+}
+
 export interface SessionDetail {
   id: string;
   summary: SessionDetailSummary | null;
+  learnings?: LearningRecord[];
   [k: string]: unknown;
 }
 

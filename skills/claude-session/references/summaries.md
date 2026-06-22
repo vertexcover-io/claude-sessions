@@ -35,6 +35,49 @@ All five fields are required (use empty arrays where you have nothing):
 A malformed payload (not JSON, or missing/empty `title`/`summary`) fails with a
 non-zero exit and uploads nothing.
 
+## Learnings (optional)
+
+If the session had failure episodes, add a `learnings` array to the same JSON.
+Each record is one diagnosed episode. **Evidence-anchored**: every learning MUST
+cite at least one `event_uuid` of observed evidence — no evidence, no record. A
+clean session has no learnings (omit the field, or send `[]`). Never invent
+failures. The Stop hook lists detected candidate anchors in its block reason to
+tell you where to look.
+
+| Field | Type | Guidance |
+|-------|------|----------|
+| `title` | string | ≤ 80 chars headline for the episode. |
+| `episode_event_uuids` | string[] | ≥ 1 `event_uuid` of the evidence (correction, tool failure, reopened task, revert). |
+| `what_went_wrong` | string | **Descriptive** prose: situation, what the agent did, the expectation gap, and why it diverged. Not a one-liner. |
+| `what_would_have_prevented` | string | **Descriptive** prose: the corrective principle and the reasoning behind it. Not a one-liner. |
+| `root_cause` | enum | `underspecified_request` · `instruction_not_followed` · `missing_verification` · `task_derailment` (model drift) · `context_loss` · `environment_or_tooling`. |
+| `attributed_to` | enum | `user` · `agent` · `shared` · `environment`. |
+| `confidence` | number | 0..1. |
+| `severity` | enum? | optional: `low` · `medium` · `high`. |
+
+```jsonc
+{
+  "title": "...", "summary": "...", "tags": ["..."],
+  "files_touched": ["..."], "prs_referenced": [],
+  "learnings": [
+    {
+      "title": "Marked the task complete without running the test suite",
+      "episode_event_uuids": ["uuid-3", "uuid-6"],
+      "what_went_wrong": "I reported the work finished before running any tests. When the suite was eventually run — only after the user pointed it out — two snapshot tests failed because they still expected the old output format. Completion was asserted on the basis of having written code, not verified behavior.",
+      "what_would_have_prevented": "Treat 'done' as a claim that requires evidence: in a repo with a test gate, run the relevant tests and read the result before reporting completion. Verification is part of the task, not an optional follow-up.",
+      "root_cause": "missing_verification",
+      "attributed_to": "agent",
+      "confidence": 0.95,
+      "severity": "high"
+    }
+  ]
+}
+```
+
+Learnings are delete-and-replaced per session on each `ok` push (last reflection
+wins), and shown in the dashboard's **Learnings** tab. Read them anytime with
+`claude-sessions learnings <session-id>` (`--json` for raw records).
+
 ## When to do it
 
 Fire it when you've completed a meaningful unit of work or are wrapping up. It's
