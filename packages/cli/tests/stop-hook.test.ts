@@ -151,4 +151,39 @@ describe("stopHookCommand", () => {
     expect(code).toBe(0);
     expect(isBlock(out)).toBe(false);
   });
+
+  it("does not re-nag when only the summarize round-trip's own events were added", async () => {
+    // Regression: the in-loop agent just authored a summary at event count 50.
+    // Running `summarize`, its tool_result, the closing assistant message and the
+    // injected block reason add ~5-6 events to the transcript *after* the
+    // watermark snapshot. With the real readWatermark and the old 5-event margin,
+    // that self-inflicted delta alone judged the summary stale and the hook nagged
+    // forever. The Stop hook's freshness margin must absorb the round-trip.
+    const summarizedAt = 50;
+    const roundTripFootprint = 6;
+    const out = captureStdout();
+    const client = {
+      getSession: async () => ({
+        summary: {
+          status: "ok",
+          model: "agent",
+          summarized_event_count: summarizedAt,
+        },
+      }),
+    } as unknown as UploadClient;
+    const code = await stopHookCommand({
+      client,
+      stdin: Readable.from([
+        JSON.stringify({
+          session_id: "sess-1",
+          transcript_path: transcript,
+          stop_hook_active: false,
+        }),
+      ]),
+      stdout: out.stream,
+      readSession: () => fakeSession(summarizedAt + roundTripFootprint),
+    });
+    expect(code).toBe(0);
+    expect(isBlock(out.get())).toBe(false);
+  });
 });

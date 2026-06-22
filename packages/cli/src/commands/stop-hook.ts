@@ -25,6 +25,19 @@ import type { UploadClient } from "../upload/client.js";
 
 export const DEFAULT_MIN_EVENTS = 10;
 
+/**
+ * Freshness margin for the nag decision. Authoring a summary is self-defeating
+ * under the shared 5-event re-summarize delta: the `Bash` tool_use that runs
+ * `summarize`, its tool_result, the turn's closing assistant message and the
+ * injected block reason all land in the transcript *after* the pipeline stamps
+ * `summarized_event_count`, so the next Stop sees a ~5-6 event delta from the
+ * round-trip alone and judges the just-authored summary stale — nagging forever.
+ * Keep this comfortably above the round-trip footprint so only genuinely new
+ * work re-triggers the nag. (The Summarizer's re-summarize gate is a separate
+ * concern and keeps the 5-event default.)
+ */
+export const DEFAULT_FRESH_DELTA = 12;
+
 export interface StopHookOptions {
   client: UploadClient;
   stdin?: NodeJS.ReadableStream;
@@ -61,6 +74,7 @@ export const stopHookCommand = async (opts: StopHookOptions): Promise<number> =>
   const stdin = opts.stdin ?? process.stdin;
   const stdout = opts.stdout ?? process.stdout;
   const minEvents = opts.minEvents ?? DEFAULT_MIN_EVENTS;
+  const minDelta = opts.minDelta ?? DEFAULT_FRESH_DELTA;
 
   let input: StopHookInput;
   try {
@@ -92,7 +106,7 @@ export const stopHookCommand = async (opts: StopHookOptions): Promise<number> =>
     const wm = await (opts.readWatermarkImpl ?? readWatermark)(sessionId, transcriptPath, {
       upload: opts.client,
       ...(opts.readSession ? { readSession: opts.readSession } : {}),
-      ...(opts.minDelta !== undefined ? { minDelta: opts.minDelta } : {}),
+      minDelta,
     });
     if (wm.fresh) return 0;
   } catch {
