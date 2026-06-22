@@ -1,5 +1,6 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
+import { Readable } from "node:stream";
 import type { SessionSummary } from "@claude-sessions/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { summarizeCommand } from "../src/commands/summarize.js";
@@ -128,5 +129,90 @@ describe("summarize CLI integration (Phase 5 cost gate)", () => {
 
     expect(code).toBe(0);
     expect(countSummaryPosts()).toBe(1);
+  });
+});
+
+describe("summarize --from-agent / --current", () => {
+  const agentJson = JSON.stringify({
+    title: "Agent-authored title",
+    summary: "The in-loop agent wrote this summary itself.",
+    tags: ["agent"],
+    files_touched: ["notes.md"],
+    prs_referenced: [],
+  });
+
+  it("--from-agent --current: reads stdin JSON, posts one agent summary", async () => {
+    const { path } = seedSession(3);
+    const code = await summarizeCommand({
+      client: buildClient(),
+      current: true,
+      fromAgent: true,
+      resolveCurrent: () => ({ session_id: SID, path }),
+      summarizerFactory: (c) => new Summarizer({ upload: c, retryDelaysMs: [] }),
+      stdin: Readable.from([Buffer.from(agentJson)]),
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+
+    expect(code).toBe(0);
+    expect(countSummaryPosts()).toBe(1);
+    const post = server.requests.find(
+      (r) => r.method === "POST" && r.path === `/api/sessions/${SID}/summary`,
+    );
+    const body = post?.body as { title: string; model: string };
+    expect(body.title).toBe("Agent-authored title");
+    expect(body.model).toBe("agent");
+  });
+
+  it("--from-agent with invalid JSON → exit 1, no summary posted", async () => {
+    const { path } = seedSession(3);
+    const code = await summarizeCommand({
+      client: buildClient(),
+      current: true,
+      fromAgent: true,
+      resolveCurrent: () => ({ session_id: SID, path }),
+      stdin: Readable.from([Buffer.from("not-json")]),
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+    expect(code).toBe(1);
+    expect(countSummaryPosts()).toBe(0);
+  });
+
+  it("--from-agent with missing title → exit 1", async () => {
+    const { path } = seedSession(3);
+    const code = await summarizeCommand({
+      client: buildClient(),
+      current: true,
+      fromAgent: true,
+      resolveCurrent: () => ({ session_id: SID, path }),
+      stdin: Readable.from([Buffer.from(JSON.stringify({ summary: "no title here" }))]),
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+    expect(code).toBe(1);
+    expect(countSummaryPosts()).toBe(0);
+  });
+
+  it("--current with no active session → exit 1", async () => {
+    const code = await summarizeCommand({
+      client: buildClient(),
+      current: true,
+      resolveCurrent: () => null,
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+    expect(code).toBe(1);
+  });
+
+  it("--current + --all together → usage error (exit 2)", async () => {
+    const code = await summarizeCommand({
+      client: buildClient(),
+      current: true,
+      all: true,
+      stdout: process.stdout,
+      stderr: process.stderr,
+    });
+    expect(code).toBe(2);
   });
 });

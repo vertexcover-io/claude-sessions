@@ -1,5 +1,6 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
+import { readCredentials } from "../config/credentials.js";
 import { listRepos } from "../config/repos.js";
 import { listTrackedFiles } from "../config/state.js";
 
@@ -29,10 +30,17 @@ export interface StatusResult {
 }
 
 /**
- * `claude-sessions status` — print a fixed-width table of repos with
- * their enabled flag, local path, and last sync timestamp (REQ-046).
+ * `claude-sessions status` — print the current auth state followed by a
+ * fixed-width table of repos with their enabled flag, local path, and last
+ * sync timestamp (REQ-046). Exits non-zero when not authenticated, since the
+ * listed repos can't sync or summarize without a token.
  */
 export const statusCommand = (opts: StatusOptions = {}): StatusResult => {
+  const creds = readCredentials();
+  const authLine = creds
+    ? `AUTH    ${creds.user_email} @ ${creds.server_url}`
+    : "AUTH    not logged in — run `claude-sessions login`";
+
   const repos = listRepos();
   const headers = ["REPO", "STATUS", "LOCAL PATH", "LAST SYNC"];
   const rows: string[][] = repos.map((r) => [
@@ -50,8 +58,8 @@ export const statusCommand = (opts: StatusOptions = {}): StatusResult => {
     headers.map((h, i) => pad(h, widths[i] as number)).join("    "),
     ...rows.map((row) => row.map((c, i) => pad(c, widths[i] as number)).join("    ")),
   ];
-  const output = `${lines.join("\n")}\n`;
+  const output = `${authLine}\n\n${lines.join("\n")}\n`;
 
   if (!opts.capture) process.stdout.write(output);
-  return { exit: 0, output };
+  return { exit: creds ? 0 : 1, output };
 };

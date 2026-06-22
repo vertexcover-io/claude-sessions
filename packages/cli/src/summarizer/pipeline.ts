@@ -20,9 +20,15 @@ export interface PipelineDeps {
   model?: string;
   attempt?: number;
   recordLogger?: (msg: string) => void;
+  /**
+   * Agent-authored narrative. When set, the in-loop coding agent supplied
+   * the summary; we skip the `claude -p` invocation and enter the pipeline
+   * at the merge step. Deterministic fields are still computed and merged.
+   */
+  providedSummary?: LlmSummary;
 }
 
-interface LlmSummary {
+export interface LlmSummary {
   title: string;
   summary: string;
   tags: string[];
@@ -51,6 +57,18 @@ const parseLlmOutput = (raw: unknown): LlmSummary => {
     files_touched: ensureArray(o.files_touched),
     prs_referenced: ensureArray(o.prs_referenced),
   };
+};
+
+/**
+ * Strict validation for an agent-authored summary (matches SUMMARY_SCHEMA's
+ * required fields). Throws on missing/empty title or summary so a malformed
+ * agent payload fails loudly rather than uploading an empty summary.
+ */
+export const parseAgentSummary = (raw: unknown): LlmSummary => {
+  const llm = parseLlmOutput(raw);
+  if (llm.title.trim().length === 0) throw new Error("agent summary: missing `title`");
+  if (llm.summary.trim().length === 0) throw new Error("agent summary: missing `summary`");
+  return llm;
 };
 
 const buildRunPayload = (args: {
@@ -108,10 +126,10 @@ export const summarizeAndUpload = async (
   deps: PipelineDeps,
 ): Promise<SessionSummary> => {
   const readSession = deps.readSession ?? readSessionSync;
-  const runClaudeFn = deps.runClaudeImpl ?? runClaude;
   const minePrsFn = deps.minePrsImpl ?? minePrs;
   const readBlobFn = deps.readBlob ?? (async (p: string) => new Uint8Array(await readFile(p)));
-  const model = deps.model ?? "sonnet";
+  const isAgent = deps.providedSummary !== undefined;
+  const model = deps.model ?? (isAgent ? "agent" : "sonnet");
   const attempt = deps.attempt ?? 1;
   const log = deps.recordLogger ?? ((m) => process.stderr.write(`${m}\n`));
 
@@ -119,48 +137,72 @@ export const summarizeAndUpload = async (
   const det = computeDeterministic(session);
   const minedPrs = await minePrsFn(session, det);
 
-  const prompt = buildPromptUserMessage(session, det);
-  const startedAt = new Date();
-  let claudeResult: Awaited<ReturnType<typeof runClaudeFn>> | null = null;
-  let claudeError: unknown = null;
-  try {
-    claudeResult = await runClaudeFn({
-      systemPrompt: SYSTEM_PROMPT,
-      userMessage: prompt.text,
-      schema: SUMMARY_SCHEMA,
-      model,
-    });
-  } catch (err) {
-    claudeError = err;
+  let llm: LlmSummary;
+  if (deps.providedSummary) {
+    // Agent-authored: skip `claude -p`, record a zero-cost provenance run.
+    llm = deps.providedSummary;
+    const now = new Date();
+    await safeRecord(
+      deps.upload,
+      sessionId,
+      buildRunPayload({
+        attempt,
+        status: "ok",
+        startedAt: now,
+        endedAt: now,
+        claudeModel: model,
+        promptChars: 0,
+        truncated: false,
+        meta: null,
+        error: null,
+      }),
+      log,
+    );
+  } else {
+    const runClaudeFn = deps.runClaudeImpl ?? runClaude;
+    const prompt = buildPromptUserMessage(session, det);
+    const startedAt = new Date();
+    let claudeResult: Awaited<ReturnType<typeof runClaudeFn>> | null = null;
+    let claudeError: unknown = null;
+    try {
+      claudeResult = await runClaudeFn({
+        systemPrompt: SYSTEM_PROMPT,
+        userMessage: prompt.text,
+        schema: SUMMARY_SCHEMA,
+        model,
+      });
+    } catch (err) {
+      claudeError = err;
+    }
+    const endedAt = new Date();
+
+    await safeRecord(
+      deps.upload,
+      sessionId,
+      buildRunPayload({
+        attempt,
+        status: claudeError ? "failed" : "ok",
+        startedAt,
+        endedAt,
+        claudeModel: model,
+        promptChars: prompt.text.length,
+        truncated: prompt.truncated,
+        meta: claudeResult?.meta ?? null,
+        error: claudeError
+          ? claudeError instanceof Error
+            ? claudeError.message
+            : String(claudeError)
+          : null,
+      }),
+      log,
+    );
+
+    if (claudeError || !claudeResult) {
+      throw claudeError ?? new Error("claude returned no result");
+    }
+
+    llm = parseLlmOutput(claudeResult.output);
   }
-  const endedAt = new Date();
-
-  await safeRecord(
-    deps.upload,
-    sessionId,
-    buildRunPayload({
-      attempt,
-      status: claudeError ? "failed" : "ok",
-      startedAt,
-      endedAt,
-      claudeModel: model,
-      promptChars: prompt.text.length,
-      truncated: prompt.truncated,
-      meta: claudeResult?.meta ?? null,
-      error: claudeError
-        ? claudeError instanceof Error
-          ? claudeError.message
-          : String(claudeError)
-        : null,
-    }),
-    log,
-  );
-
-  if (claudeError || !claudeResult) {
-    throw claudeError ?? new Error("claude returned no result");
-  }
-
-  const llm = parseLlmOutput(claudeResult.output);
 
   const summary: SessionSummary = {
     session_id: sessionId,

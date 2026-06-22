@@ -1,6 +1,8 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
+import { fileURLToPath } from "node:url";
 import { detectRepo } from "@claude-sessions/core";
+import { isWatcherAlive, startWatcherDaemon, stopWatcherDaemon } from "../config/daemon.js";
 import { upsertRepo } from "../config/repos.js";
 import { findSessionsForRepo } from "../discover.js";
 import type { UploadClient } from "../upload/client.js";
@@ -12,7 +14,17 @@ export interface EnableOptions {
   skipBackfill?: boolean;
   /** Inject upload client; if undefined, the caller must build one. */
   client: UploadClient;
+  /** Override the spawned daemon entry point (tests). */
+  cliEntry?: string;
+  /**
+   * Refresh the running watcher so it picks up the newly-enabled repo (the
+   * daemon reads repos.json only at start). Injectable for tests; defaults
+   * to bouncing the daemon when one is alive.
+   */
+  refreshDaemon?: () => void;
 }
+
+const resolveCliEntry = (): string => fileURLToPath(new URL("../main.js", import.meta.url));
 
 /**
  * `claude-sessions enable [path]` — register the repo locally + on the
@@ -47,6 +59,16 @@ export const enableCommand = async (opts: EnableOptions): Promise<number> => {
       }
     }
   }
+
+  // Bounce the watcher so it re-scans repos.json and starts watching this repo.
+  const refreshDaemon =
+    opts.refreshDaemon ??
+    (() => {
+      if (!isWatcherAlive()) return;
+      stopWatcherDaemon();
+      startWatcherDaemon({ cliEntry: opts.cliEntry ?? resolveCliEntry() });
+    });
+  refreshDaemon();
 
   process.stdout.write(`enabled: ${id.canonical_url}\n`);
   return 0;

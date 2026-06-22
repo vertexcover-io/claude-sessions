@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { disableCommand } from "../src/commands/disable.js";
 import { enableCommand } from "../src/commands/enable.js";
 import { statusCommand } from "../src/commands/status.js";
+import { writeCredentials } from "../src/config/credentials.js";
 import { listRepos } from "../src/config/repos.js";
 import { UploadClient } from "../src/upload/client.js";
 import { makeTempGitRepo } from "./helpers/git-repo.js";
@@ -49,6 +50,25 @@ describe("enable command (REQ-010, REQ-011)", () => {
       expect((calls[0]?.body as { canonical_url: string }).canonical_url).toBe(
         "github.com/fixture/enable-test",
       );
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it("refreshes the watcher daemon after enabling so it picks up the new repo", async () => {
+    const repo = makeTempGitRepo("git@github.com:fixture/enable-refresh.git");
+    try {
+      let refreshed = 0;
+      const code = await enableCommand({
+        path: repo.path,
+        client: buildClient(),
+        skipBackfill: true,
+        refreshDaemon: () => {
+          refreshed += 1;
+        },
+      });
+      expect(code).toBe(0);
+      expect(refreshed).toBe(1);
     } finally {
       repo.cleanup();
     }
@@ -121,6 +141,11 @@ describe("status command (REQ-046)", () => {
     const repo = makeTempGitRepo("git@github.com:fixture/status-test.git");
     try {
       await enableCommand({ path: repo.path, client: buildClient(), skipBackfill: true });
+      await writeCredentials({
+        server_url: server.url,
+        token: "test-token",
+        user_email: "fixture@example.com",
+      });
       const result = statusCommand({ capture: true });
       expect(result.exit).toBe(0);
       expect(result.output).toMatch(/REPO\s+STATUS\s+LOCAL PATH\s+LAST SYNC/);

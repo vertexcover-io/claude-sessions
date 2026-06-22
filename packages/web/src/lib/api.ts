@@ -2,6 +2,8 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
+  ArtifactContent,
+  ArtifactMeta,
   RepoSummary,
   SearchFacets,
   SearchResult,
@@ -167,6 +169,20 @@ export const useSessionCommits = (id: string | undefined) =>
     queryKey: ["session-commits", id],
     enabled: !!id,
     queryFn: () => apiFetch<{ commits: SessionCommit[] }>(`/api/sessions/${id}/commits`),
+  });
+
+export const useSessionArtifacts = (id: string | undefined) =>
+  useQuery({
+    queryKey: ["session-artifacts", id],
+    enabled: !!id,
+    queryFn: () => apiFetch<{ artifacts: ArtifactMeta[] }>(`/api/sessions/${id}/artifacts`),
+  });
+
+export const useSessionArtifact = (id: string | undefined, artifactId: string | undefined) =>
+  useQuery({
+    queryKey: ["session-artifact", id, artifactId],
+    enabled: !!id && !!artifactId,
+    queryFn: () => apiFetch<ArtifactContent>(`/api/sessions/${id}/artifacts/${artifactId}`),
   });
 
 // ----- Search -------------------------------------------------------------

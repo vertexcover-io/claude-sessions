@@ -3,11 +3,14 @@
 
 import { Command } from "commander";
 import { buildClient } from "./commands/_client.js";
+import { artifactsCommand } from "./commands/artifacts.js";
 import { disableCommand } from "./commands/disable.js";
 import { enableCommand } from "./commands/enable.js";
+import { ensureCommand } from "./commands/ensure.js";
 import { findCommand } from "./commands/find.js";
 import { forkCommand } from "./commands/fork.js";
 import { initCommand } from "./commands/init.js";
+import { installHooksCommand, uninstallHooksCommand } from "./commands/install-hooks.js";
 import { loginCommand } from "./commands/login.js";
 import { logoutCommand } from "./commands/logout.js";
 import { logsCommand } from "./commands/logs.js";
@@ -33,6 +36,15 @@ const main = async (): Promise<void> => {
     .option("--server <url>", "server URL", "http://localhost:3000")
     .action(async (opts: { server: string }) => {
       const code = await initCommand({ serverUrl: opts.server });
+      process.exit(code);
+    });
+
+  program
+    .command("ensure")
+    .description("Verify auth + watcher are up (SessionStart hook entry point). Never blocks.")
+    .option("--server <url>", "server URL", "http://localhost:3000")
+    .action(async (opts: { server: string }) => {
+      const code = await ensureCommand({ serverUrl: opts.server });
       process.exit(code);
     });
 
@@ -111,6 +123,42 @@ const main = async (): Promise<void> => {
     });
 
   program
+    .command("artifacts <session-id>")
+    .description("Push the files an agent created/edited during a session to the server.")
+    .option(
+      "--file <path>",
+      "push this file (repeatable); replaces auto-derivation",
+      (val: string, acc: string[]) => {
+        acc.push(val);
+        return acc;
+      },
+      [] as string[],
+    )
+    .option(
+      "--glob <pattern>",
+      "push files matching this glob (repeatable); replaces auto-derivation",
+      (val: string, acc: string[]) => {
+        acc.push(val);
+        return acc;
+      },
+      [] as string[],
+    )
+    .option("--dry-run", "print the resolved file list and exit without uploading", false)
+    .action(
+      async (sessionId: string, opts: { file: string[]; glob: string[]; dryRun: boolean }) => {
+        const client = buildClient();
+        const code = await artifactsCommand({
+          sessionId,
+          client,
+          files: opts.file,
+          globs: opts.glob,
+          dryRun: opts.dryRun,
+        });
+        process.exit(code);
+      },
+    );
+
+  program
     .command("watch")
     .description("Long-running watcher. Tails JSONL files and uploads new events.")
     .action(async () => {
@@ -120,21 +168,36 @@ const main = async (): Promise<void> => {
 
   program
     .command("summarize [session-id]")
-    .description("Summarize a session by id, or all enabled-repo sessions with --all.")
+    .description("Summarize a session by id, the current session, or all enabled-repo sessions.")
     .option("--all", "summarize every discovered session", false)
+    .option("--current", "target the active session for the current directory", false)
+    .option(
+      "--from-agent",
+      "read an agent-authored summary (JSON) from stdin instead of claude -p",
+      false,
+    )
     .option("--force", "bypass watermark/status gate", false)
     .option("--since <iso>", "only include sessions started at or after this ISO-8601 timestamp")
     .option("--yes", "skip the confirmation prompt", false)
     .action(
       async (
         sessionId: string | undefined,
-        opts: { all: boolean; force: boolean; since?: string; yes: boolean },
+        opts: {
+          all: boolean;
+          current: boolean;
+          fromAgent: boolean;
+          force: boolean;
+          since?: string;
+          yes: boolean;
+        },
       ) => {
         const client = buildClient();
         const code = await summarizeCommand({
           client,
           ...(sessionId !== undefined ? { sessionId } : {}),
           all: opts.all,
+          current: opts.current,
+          fromAgent: opts.fromAgent,
           force: opts.force,
           ...(opts.since !== undefined ? { since: opts.since } : {}),
           yes: opts.yes,
@@ -225,6 +288,20 @@ const main = async (): Promise<void> => {
     .action(async () => {
       const code = await mcpCommand();
       process.exit(code);
+    });
+
+  program
+    .command("install-hooks")
+    .description("Install the global SessionStart hook (`claude-sessions ensure`) into settings.")
+    .action(() => {
+      process.exit(installHooksCommand());
+    });
+
+  program
+    .command("uninstall-hooks")
+    .description("Remove the claude-sessions SessionStart hook from settings.")
+    .action(() => {
+      process.exit(uninstallHooksCommand());
     });
 
   await program.parseAsync(process.argv);

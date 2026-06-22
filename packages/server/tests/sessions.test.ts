@@ -7,6 +7,7 @@ import { buildApp } from "../src/app.js";
 import type { Db } from "../src/db/client.js";
 import {
   events,
+  artifacts,
   auditLog,
   embeddings,
   sessionBlobs,
@@ -607,6 +608,185 @@ describe("PATCH /api/sessions/:id privacy (REQ-039, EDGE-018)", () => {
     expect(r.status).toBe(200);
     const row = (await db.db.select().from(sessions).where(eq(sessions.id, sessionId)))[0];
     expect(row?.isPrivate).toBe(false);
+  });
+});
+
+describe("artifacts: POST + GET list + GET one", () => {
+  const postArtifact = (
+    sessionId: string,
+    token: string,
+    body: { path: string; mime_type: string; content: string },
+  ): Promise<Response> => post(`/api/sessions/${sessionId}/artifacts`, token, body);
+
+  it("upserts on (session_id, path): re-push updates, does not duplicate", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "artifact-upsert@example.test",
+      repoUrl: "github.com/example/artifact-upsert",
+    });
+    const sessionId = "session-artifact-upsert";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const r1 = await postArtifact(sessionId, seed.token, {
+      path: "docs/report.md",
+      mime_type: "text/markdown",
+      content: "# v1",
+    });
+    expect(r1.status).toBe(200);
+    const r2 = await postArtifact(sessionId, seed.token, {
+      path: "docs/report.md",
+      mime_type: "text/markdown",
+      content: "# v2 longer content",
+    });
+    expect(r2.status).toBe(200);
+
+    const rows = await db.db.select().from(artifacts).where(eq(artifacts.sessionId, sessionId));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.bytes.toString("utf8")).toBe("# v2 longer content");
+  });
+
+  it("lists artifact metadata (no bytes) for the session", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "artifact-list@example.test",
+      repoUrl: "github.com/example/artifact-list",
+    });
+    const sessionId = "session-artifact-list";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    await postArtifact(sessionId, seed.token, {
+      path: "b.txt",
+      mime_type: "text/plain",
+      content: "bbb",
+    });
+    await postArtifact(sessionId, seed.token, {
+      path: "a.md",
+      mime_type: "text/markdown",
+      content: "# a",
+    });
+
+    const res = await get(`/api/sessions/${sessionId}/artifacts`, seed.token);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      artifacts: Array<{ id: string; path: string; mime_type: string; byte_size: number }>;
+    };
+    expect(json.artifacts).toHaveLength(2);
+    // ordered by path
+    expect(json.artifacts.map((a) => a.path)).toEqual(["a.md", "b.txt"]);
+    expect(json.artifacts[0]?.mime_type).toBe("text/markdown");
+    expect(json.artifacts[0]?.byte_size).toBe(3);
+  });
+
+  it("fetches one artifact's decoded content and writes a read_artifact audit row", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "artifact-fetch@example.test",
+      repoUrl: "github.com/example/artifact-fetch",
+    });
+    const sessionId = "session-artifact-fetch";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    await postArtifact(sessionId, seed.token, {
+      path: "notes.md",
+      mime_type: "text/markdown",
+      content: "# Heading\n\nbody",
+    });
+    const listed = (await (
+      await get(`/api/sessions/${sessionId}/artifacts`, seed.token)
+    ).json()) as { artifacts: Array<{ id: string }> };
+    const artifactId = listed.artifacts[0]?.id ?? "";
+
+    const res = await get(`/api/sessions/${sessionId}/artifacts/${artifactId}`, seed.token);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { path: string; mime_type: string; content: string };
+    expect(json.path).toBe("notes.md");
+    expect(json.content).toBe("# Heading\n\nbody");
+
+    const audits = await db.db
+      .select({ action: auditLog.action })
+      .from(auditLog)
+      .where(eq(auditLog.targetSessionId, sessionId));
+    expect(audits.map((a) => a.action)).toContain("read_artifact");
+  });
+
+  it("redacts secrets in artifact content (defense-in-depth)", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "artifact-redact@example.test",
+      repoUrl: "github.com/example/artifact-redact",
+    });
+    const sessionId = "session-artifact-redact";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    await postArtifact(sessionId, seed.token, {
+      path: "leak.txt",
+      mime_type: "text/plain",
+      content: "key is AKIA0123456789ABCDEF here",
+    });
+    const row = (await db.db.select().from(artifacts).where(eq(artifacts.sessionId, sessionId)))[0];
+    expect(row?.bytes.toString("utf8")).not.toContain("AKIA0123456789ABCDEF");
+    expect(row?.bytes.toString("utf8")).toContain("[REDACTED:");
+  });
+
+  it("413 when content exceeds the per-artifact cap", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "artifact-big@example.test",
+      repoUrl: "github.com/example/artifact-big",
+    });
+    const sessionId = "session-artifact-big";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const huge = "x".repeat(5 * 1024 * 1024 + 1);
+    const res = await postArtifact(sessionId, seed.token, {
+      path: "huge.txt",
+      mime_type: "text/plain",
+      content: huge,
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("RBAC: another user cannot POST, list, or fetch artifacts (404)", async () => {
+    const a = await seedUser(db.db, env.JWT_SECRET, {
+      email: "artifact-rbac-a@example.test",
+      repoUrl: "github.com/example/artifact-rbac-a",
+    });
+    const b = await seedUser(db.db, env.JWT_SECRET, {
+      email: "artifact-rbac-b@example.test",
+      repoUrl: "github.com/example/artifact-rbac-b",
+    });
+    const sessionId = "session-artifact-rbac";
+    await insertSession(sessionId, a.user.id, a.repoId);
+    await postArtifact(sessionId, a.token, {
+      path: "a.md",
+      mime_type: "text/markdown",
+      content: "# a",
+    });
+
+    expect(
+      (
+        await postArtifact(sessionId, b.token, {
+          path: "x.md",
+          mime_type: "text/markdown",
+          content: "x",
+        })
+      ).status,
+    ).toBe(404);
+    expect((await get(`/api/sessions/${sessionId}/artifacts`, b.token)).status).toBe(404);
+  });
+
+  it("is_private=true scrub deletes artifacts", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "artifact-priv@example.test",
+      repoUrl: "github.com/example/artifact-priv",
+    });
+    const sessionId = "session-artifact-priv";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+    await postArtifact(sessionId, seed.token, {
+      path: "a.md",
+      mime_type: "text/markdown",
+      content: "# a",
+    });
+
+    await patch(`/api/sessions/${sessionId}`, seed.token, { is_private: true });
+    expect(
+      await db.db.select().from(artifacts).where(eq(artifacts.sessionId, sessionId)),
+    ).toHaveLength(0);
   });
 });
 

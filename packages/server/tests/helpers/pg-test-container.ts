@@ -62,6 +62,7 @@ export const startTestPostgres = async (): Promise<TestPgHandle> => {
 export const truncateAll = async (db: Db): Promise<void> => {
   await db.sql`TRUNCATE
     audit_log,
+    artifacts,
     session_pr_links,
     session_blobs,
     embeddings,

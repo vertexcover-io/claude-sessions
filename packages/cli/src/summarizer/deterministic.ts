@@ -35,18 +35,47 @@ const dedupe = <T>(arr: readonly T[]): T[] => {
 };
 
 /**
- * Pull every plausible file path out of a tool_use event. Inputs come in
- * three shapes:
+ * Pull file paths out of a tool input object. Inputs come in a few shapes:
  *   - { file_path: "..." } (Edit/Write/Read)
  *   - { path: "..." } (some adapters)
+ *   - { notebook_path: "..." } (NotebookEdit)
  *   - { edits: [{ file_path: "..." }, ...] } (MultiEdit)
+ */
+const pathsFromToolInput = (input: unknown): string[] => {
+  if (!input || typeof input !== "object") return [];
+  const o = input as {
+    file_path?: unknown;
+    path?: unknown;
+    notebook_path?: unknown;
+    edits?: unknown;
+  };
+  const out: string[] = [];
+  if (typeof o.file_path === "string") out.push(o.file_path);
+  if (typeof o.path === "string") out.push(o.path);
+  if (typeof o.notebook_path === "string") out.push(o.notebook_path);
+  if (Array.isArray(o.edits)) {
+    for (const e of o.edits) {
+      if (
+        e &&
+        typeof e === "object" &&
+        typeof (e as { file_path?: unknown }).file_path === "string"
+      ) {
+        out.push((e as { file_path: string }).file_path);
+      }
+    }
+  }
+  return out;
+};
+
+/**
+ * Pull every plausible file path out of a tool_use event, gated on `tools`.
  *
  * The canonical event truncates the input summary to 200 chars, but the
  * raw payload is preserved on `ev.raw`. We read from `raw.input` when it
  * exists; otherwise we fall back to parsing the summary string.
  */
-const extractFiles = (ev: ToolUseEvent): string[] => {
-  if (!FILE_TOOLS.has(ev.tool)) return [];
+export const extractFilesForTools = (ev: ToolUseEvent, tools: ReadonlySet<string>): string[] => {
+  if (!tools.has(ev.tool)) return [];
   const out: string[] = [];
 
   // Walk the original assistant content for the file_path field.
@@ -56,7 +85,7 @@ const extractFiles = (ev: ToolUseEvent): string[] => {
           content?: Array<{
             type?: string;
             id?: string;
-            input?: { file_path?: unknown; path?: unknown; edits?: unknown };
+            input?: unknown;
           }>;
         };
       }
@@ -64,27 +93,7 @@ const extractFiles = (ev: ToolUseEvent): string[] => {
   const blocks = raw?.message?.content ?? [];
   for (const b of blocks) {
     if (b?.type !== "tool_use" || b.id !== ev.tool_use_id) continue;
-    const input = b.input;
-    if (input && typeof input === "object") {
-      if (typeof (input as { file_path?: unknown }).file_path === "string") {
-        out.push((input as { file_path: string }).file_path);
-      }
-      if (typeof (input as { path?: unknown }).path === "string") {
-        out.push((input as { path: string }).path);
-      }
-      const edits = (input as { edits?: unknown }).edits;
-      if (Array.isArray(edits)) {
-        for (const e of edits) {
-          if (
-            e &&
-            typeof e === "object" &&
-            typeof (e as { file_path?: unknown }).file_path === "string"
-          ) {
-            out.push((e as { file_path: string }).file_path);
-          }
-        }
-      }
-    }
+    out.push(...pathsFromToolInput(b.input));
   }
 
   // Fallback: input_summary is the first scalar field for the common shapes.
@@ -93,6 +102,13 @@ const extractFiles = (ev: ToolUseEvent): string[] => {
   }
   return out.filter((p) => p.length > 0);
 };
+
+/**
+ * Summarizer file mining: paths from Edit/Write/MultiEdit/Read tool inputs.
+ * `files_touched` intentionally includes Read — it answers "what files did
+ * this session involve". (Artifacts use a write-only set instead.)
+ */
+export const extractFiles = (ev: ToolUseEvent): string[] => extractFilesForTools(ev, FILE_TOOLS);
 
 const minePrsFromText = (text: string): string[] => {
   const matches = text.match(GH_PR_URL_RE);

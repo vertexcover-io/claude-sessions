@@ -12,6 +12,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 
@@ -154,6 +155,27 @@ export const sessionBlobs = pgTable("session_blobs", {
   byteSize: integer("byte_size").notNull(),
   uploadedAt: timestamp("uploaded_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
 });
+
+export const artifacts = pgTable(
+  "artifacts",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    path: text("path").notNull(),
+    mimeType: text("mime_type").notNull(),
+    bytes: bytea("bytes").notNull(),
+    byteSize: integer("byte_size").notNull(),
+    uploadedAt: timestamp("uploaded_at", { withTimezone: true, mode: "date" })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    sessionPathUniq: uniqueIndex("artifacts_session_path_uniq").on(t.sessionId, t.path),
+    sessionUploadedIdx: index("idx_artifacts_session_uploaded").on(t.sessionId, t.uploadedAt),
+  }),
+);
 
 export const sessionPrLinks = pgTable(
   "session_pr_links",

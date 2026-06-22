@@ -271,6 +271,30 @@ export class UploadClient {
     )) as { accepted_events: number; skipped_duplicates: number };
   }
 
+  /**
+   * POST /api/sessions/:id/artifacts — push a single file an agent
+   * created/edited during the session. Body is already redacted by the
+   * caller (load-bearing CLI invariant). Returns 413 for >5MB content,
+   * 404 if the session isn't owned. 4xx is non-retryable, mirroring
+   * `ingest()`.
+   */
+  async uploadArtifact(
+    sessionId: string,
+    artifact: { path: string; mime_type: string; content: string },
+  ): Promise<{ id: string; byte_size: number }> {
+    return (await retryWithBackoff(
+      async () =>
+        (await this.request(
+          `/api/sessions/${encodeURIComponent(sessionId)}/artifacts`,
+          artifact,
+        )) as { id: string; byte_size: number },
+      {
+        ...(this.retryDelaysMs !== undefined ? { delaysMs: this.retryDelaysMs } : {}),
+        shouldRetry: (err) => !(err instanceof HttpError && err.status >= 400 && err.status < 500),
+      },
+    )) as { id: string; byte_size: number };
+  }
+
   async enableRepo(canonicalUrl: string, localPath: string): Promise<void> {
     await this.request("/api/repos/enable", {
       canonical_url: canonicalUrl,
