@@ -4,7 +4,7 @@ import { FileText } from "lucide-react";
 import { useState } from "react";
 import { useSessionArtifacts } from "../../lib/api";
 import type { ArtifactMeta } from "../../lib/types";
-import { ArtifactModal } from "../ArtifactModal";
+import { ArtifactDrawer } from "../ArtifactDrawer";
 
 const formatBytes = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`;
@@ -52,7 +52,7 @@ export const ArtifactsPanel = ({ sessionId }: { sessionId: string }) => {
         ))}
       </div>
       {selected && (
-        <ArtifactModal
+        <ArtifactDrawer
           open={!!selected}
           onClose={() => setSelected(null)}
           sessionId={sessionId}

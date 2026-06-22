@@ -741,6 +741,7 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
             tool_call_counts: summary.toolCallCounts,
             status: summary.status,
             summarized_event_count: summary.summarizedEventCount ?? null,
+            model: summary.model ?? null,
           }
         : null,
     });

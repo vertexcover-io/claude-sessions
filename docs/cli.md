@@ -106,10 +106,25 @@ Long-lived foreground tail.
 - Watches parent directories of every known JSONL with `depth: 1`
 - New `.jsonl` adds are picked up automatically
 - Per-file consume is serialized so a burst of writes doesn't race on `state.json`
-- `SessionEndDetector` fires summarization 60s after the last event for a session
+- The watcher only tails and uploads — it never summarizes. Summaries are
+  authored by the in-loop agent (`summarize --current --from-agent`, prompted by
+  the `Stop` hook); there is no timer-based trigger.
 - `SIGINT` / `SIGTERM` closes chokidar + drains in-flight uploads cleanly
 
-The summarizer is gated by a global semaphore (capacity 2, REQ-019).
+When summaries are generated (agent push or manual `claude -p`), the summarizer
+is gated by a global semaphore (capacity 2, REQ-019).
+
+### Hooks and the provisional title
+
+`install-hooks` registers three global hooks: `SessionStart` (`ensure`),
+`UserPromptSubmit` (`prompt-hook`), and `Stop` (`stop-hook`). On the first
+prompt of a new session, `prompt-hook` probes the server and — if no summary
+exists yet — injects a one-time instruction telling the in-loop agent to run
+`summarize --current --from-agent --provisional`. That writes a quick title
+derived from the request (stamped `model=heuristic`) so the dashboard shows a
+readable name immediately instead of `Session <id>`; the richer `Stop`-hook
+summary supersedes it later. The `--provisional` flag is only valid with
+`--from-agent`.
 
 ### `fork`
 

@@ -76,7 +76,7 @@ describe("ArtifactsPanel", () => {
   it("renders a MarkdownView for text/markdown artifacts", () => {
     const { container } = renderPanel();
     fireEvent.click(screen.getByText("docs/PLAN.md"));
-    expect(screen.getByTestId("artifact-modal")).toBeTruthy();
+    expect(screen.getByTestId("artifact-drawer")).toBeTruthy();
     // MarkdownView renders an h1 from the leading "# Heading".
     expect(container.querySelector("h1")?.textContent).toBe("Heading");
     expect(container.querySelector('[data-testid="artifact-pre"]')).toBeNull();
@@ -87,5 +87,30 @@ describe("ArtifactsPanel", () => {
     fireEvent.click(screen.getByText("out/log.txt"));
     const pre = screen.getByTestId("artifact-pre");
     expect(pre.textContent).toBe("plain text body");
+  });
+
+  it("swaps drawer content in place when another artifact is clicked", () => {
+    const { container } = renderPanel();
+    fireEvent.click(screen.getByText("docs/PLAN.md"));
+    expect(container.querySelector("h1")?.textContent).toBe("Heading");
+    fireEvent.click(screen.getByText("out/log.txt"));
+    // Single drawer, content swapped: markdown gone, <pre> now present.
+    expect(container.querySelector("h1")).toBeNull();
+    expect(screen.getByTestId("artifact-pre").textContent).toBe("plain text body");
+    expect(screen.getAllByTestId("artifact-drawer")).toHaveLength(1);
+  });
+
+  it("closes the drawer on backdrop click", () => {
+    renderPanel();
+    fireEvent.click(screen.getByText("docs/PLAN.md"));
+    fireEvent.click(screen.getByLabelText("close dialog"));
+    expect(screen.queryByTestId("artifact-drawer")).toBeNull();
+  });
+
+  it("closes the drawer on Escape", () => {
+    renderPanel();
+    fireEvent.click(screen.getByText("docs/PLAN.md"));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByTestId("artifact-drawer")).toBeNull();
   });
 });

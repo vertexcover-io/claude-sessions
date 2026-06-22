@@ -192,6 +192,33 @@ describe("Summarizer watermark skip (REQ-003..REQ-006, REQ-012, REQ-013)", () =>
     expect(out.summarized_event_count).toBe(20);
   });
 
+  it("model=heuristic (provisional title) is never fresh — runs pipeline even at delta=1", async () => {
+    const upload = buildFakeUploadWithGet(async (id) =>
+      detailWithSummary(id, {
+        title: "provisional title",
+        summary: "first-prompt title",
+        tags: [],
+        files_touched: [],
+        prs_referenced: [],
+        tool_call_counts: {},
+        status: "ok",
+        summarized_event_count: 20,
+        model: "heuristic",
+      }),
+    );
+    const runPipeline = vi.fn().mockResolvedValue(buildOkSummary("s-prov"));
+    const sum = new Summarizer({
+      upload: upload as unknown as UploadClient,
+      runPipeline,
+      readSessionImpl: () => makeSession(21),
+      logger: () => undefined,
+    });
+
+    await sum.summarize("s-prov", "/tmp/x.jsonl");
+
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+  });
+
   it("REQ-003 / EDGE-004: ok+watermark=20, current=25 (delta=5) runs pipeline", async () => {
     const upload = buildFakeUploadWithGet(async (id) =>
       detailWithSummary(id, {
@@ -428,6 +455,34 @@ describe("Summarizer backfill-only mode + agent passthrough", () => {
     expect(runPipeline).not.toHaveBeenCalled();
     expect(out.status).toBe("ok");
     expect(out.title).toBe("agent title");
+  });
+
+  it("backfillOnly: upgrades a provisional (model=heuristic) summary instead of skipping", async () => {
+    const upload = buildFakeUploadWithGet(async (id) =>
+      detailWithSummary(id, {
+        title: "provisional title",
+        summary: "first-prompt title",
+        tags: [],
+        files_touched: [],
+        prs_referenced: [],
+        tool_call_counts: {},
+        status: "ok",
+        summarized_event_count: 2,
+        model: "heuristic",
+      }),
+    );
+    const runPipeline = vi.fn().mockResolvedValue(buildOkSummary("s-bf-prov"));
+    const sum = new Summarizer({
+      upload: upload as unknown as UploadClient,
+      backfillOnly: true,
+      runPipeline,
+      readSessionImpl: () => makeSession(40),
+      logger: () => undefined,
+    });
+
+    await sum.summarize("s-bf-prov", "/tmp/x.jsonl");
+
+    expect(runPipeline).toHaveBeenCalledTimes(1);
   });
 
   it("backfillOnly: runs pipeline when no summary exists yet", async () => {

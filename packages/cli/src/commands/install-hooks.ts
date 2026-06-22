@@ -4,7 +4,20 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const HOOK_COMMAND = "claude-sessions ensure";
+/**
+ * The hooks we manage. `SessionStart` keeps auth + the watcher up;
+ * `UserPromptSubmit` gives a new session a provisional title on its first
+ * prompt; `Stop` makes the in-loop agent author its own session summary
+ * before the turn ends (the primary summarization trigger — there is no timer).
+ */
+const MANAGED_HOOKS: { event: string; command: string }[] = [
+  { event: "SessionStart", command: "claude-sessions ensure" },
+  { event: "UserPromptSubmit", command: "claude-sessions prompt-hook" },
+  { event: "Stop", command: "claude-sessions stop-hook" },
+];
+
+const MANAGED_COMMANDS = new Set(MANAGED_HOOKS.map((h) => h.command));
+const MANAGED_EVENTS = new Set(MANAGED_HOOKS.map((h) => h.event));
 
 export interface InstallHooksOptions {
   /** Override the settings.json path (tests). */
@@ -43,8 +56,8 @@ const writeSettings = (path: string, settings: Record<string, unknown>): void =>
 
 const asMatchers = (v: unknown): HookMatcher[] => (Array.isArray(v) ? (v as HookMatcher[]) : []);
 
-const hasOurHook = (matchers: HookMatcher[]): boolean =>
-  matchers.some((m) => (m.hooks ?? []).some((h) => h.command === HOOK_COMMAND));
+const hasCommand = (matchers: HookMatcher[], command: string): boolean =>
+  matchers.some((m) => (m.hooks ?? []).some((h) => h.command === command));
 
 export const installHooksCommand = (opts: InstallHooksOptions = {}): number => {
   const path = opts.settingsPath ?? defaultSettingsPath();
@@ -63,18 +76,24 @@ export const installHooksCommand = (opts: InstallHooksOptions = {}): number => {
     settings.hooks && typeof settings.hooks === "object"
       ? (settings.hooks as Record<string, unknown>)
       : {};
-  const sessionStart = asMatchers(hooks.SessionStart);
 
-  if (hasOurHook(sessionStart)) {
-    stdout.write(`SessionStart hook already installed in ${path}\n`);
+  const installed: string[] = [];
+  for (const mh of MANAGED_HOOKS) {
+    const matchers = asMatchers(hooks[mh.event]);
+    if (hasCommand(matchers, mh.command)) continue;
+    matchers.push({ hooks: [{ type: "command", command: mh.command }] });
+    hooks[mh.event] = matchers;
+    installed.push(mh.event);
+  }
+
+  if (installed.length === 0) {
+    stdout.write(`hooks already installed in ${path}\n`);
     return 0;
   }
 
-  sessionStart.push({ hooks: [{ type: "command", command: HOOK_COMMAND }] });
-  hooks.SessionStart = sessionStart;
   settings.hooks = hooks;
   writeSettings(path, settings);
-  stdout.write(`installed SessionStart hook (\`${HOOK_COMMAND}\`) in ${path}\n`);
+  stdout.write(`installed ${installed.join(" + ")} hook(s) in ${path}\n`);
   return 0;
 };
 
@@ -100,25 +119,31 @@ export const uninstallHooksCommand = (opts: InstallHooksOptions = {}): number =>
     settings.hooks && typeof settings.hooks === "object"
       ? (settings.hooks as Record<string, unknown>)
       : {};
-  if (!Array.isArray(hooks.SessionStart)) {
+
+  // Rebuild without empty keys (rather than `delete`) so an emptied hooks
+  // object drops out entirely instead of serializing as `{}`.
+  let removed = false;
+  const nextHooks: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(hooks)) {
+    if (!MANAGED_EVENTS.has(k) || !Array.isArray(v)) {
+      nextHooks[k] = v;
+      continue;
+    }
+    const filtered = asMatchers(v)
+      .map((m) => {
+        const kept = (m.hooks ?? []).filter((h) => !MANAGED_COMMANDS.has(h.command ?? ""));
+        if (kept.length !== (m.hooks ?? []).length) removed = true;
+        return { ...m, hooks: kept };
+      })
+      .filter((m) => (m.hooks ?? []).length > 0);
+    if (filtered.length > 0) nextHooks[k] = filtered;
+  }
+
+  if (!removed) {
     stdout.write("nothing to uninstall\n");
     return 0;
   }
 
-  const filtered = asMatchers(hooks.SessionStart)
-    .map((m) => ({ ...m, hooks: (m.hooks ?? []).filter((h) => h.command !== HOOK_COMMAND) }))
-    .filter((m) => (m.hooks ?? []).length > 0);
-
-  // Rebuild without empty keys (rather than `delete`) so an emptied hooks
-  // object drops out entirely instead of serializing as `{}`.
-  const nextHooks: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(hooks)) {
-    if (k === "SessionStart") {
-      if (filtered.length > 0) nextHooks[k] = filtered;
-    } else {
-      nextHooks[k] = v;
-    }
-  }
   const nextSettings: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(settings)) {
     if (k === "hooks") {
@@ -129,6 +154,6 @@ export const uninstallHooksCommand = (opts: InstallHooksOptions = {}): number =>
   }
 
   writeSettings(path, nextSettings);
-  stdout.write(`removed SessionStart hook from ${path}\n`);
+  stdout.write(`removed claude-sessions hooks from ${path}\n`);
   return 0;
 };

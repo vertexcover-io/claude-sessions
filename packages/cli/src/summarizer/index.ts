@@ -6,9 +6,11 @@ import { HttpError, type UploadClient } from "../upload/client.js";
 import type { runClaude } from "./claude-runner.js";
 import { type LlmSummary, type PipelineDeps, summarizeAndUpload } from "./pipeline.js";
 import type { minePrs } from "./pr-mining.js";
+import { readWatermark } from "./watermark.js";
 
-export { SessionEndDetector } from "./end-detect.js";
 export { computeDeterministic } from "./deterministic.js";
+export { readWatermark, DEFAULT_MIN_RESUMMARIZE_DELTA } from "./watermark.js";
+export type { WatermarkState, WatermarkDeps } from "./watermark.js";
 export { runClaude } from "./claude-runner.js";
 export { minePrs } from "./pr-mining.js";
 export {
@@ -162,21 +164,24 @@ export class Summarizer {
     jsonlPath: string,
   ): Promise<SessionSummary | null> {
     try {
-      const existing = await this.upload.getSession(sessionId);
-      const s = existing.summary;
+      const wm = await readWatermark(sessionId, jsonlPath, {
+        upload: this.upload,
+        readSession: this.readSessionImpl,
+        minDelta: this.minResumarizeDelta,
+      });
+      const s = wm.summary;
       if (!s || s.status !== "ok") return null;
+      // A provisional first-prompt title (model=heuristic) is not authoritative;
+      // never skip on it, so even the backfill `claude -p` path upgrades it.
+      if (s.model === "heuristic") return null;
       // Backfill-only: any existing `ok` summary wins (agent-authored or prior).
       if (this.backfillOnly) {
         this.logger(`summarize skipped for ${sessionId}: backfill-only, ok summary exists`);
         return this.buildSkipSummary(sessionId, s);
       }
-      if (s.summarized_event_count == null) return null;
-      const session = this.readSessionImpl(jsonlPath);
-      const currentCount = session.events.length;
-      const delta = currentCount - s.summarized_event_count;
-      if (delta >= this.minResumarizeDelta) return null;
+      if (!wm.fresh) return null;
       this.logger(
-        `summarize skipped for ${sessionId}: delta=${delta} < ${this.minResumarizeDelta}`,
+        `summarize skipped for ${sessionId}: delta=${wm.delta} < ${this.minResumarizeDelta}`,
       );
       return this.buildSkipSummary(sessionId, s);
     } catch (err) {
@@ -190,7 +195,7 @@ export class Summarizer {
   async summarize(
     sessionId: string,
     jsonlPath: string,
-    opts?: { force?: boolean; providedSummary?: LlmSummary },
+    opts?: { force?: boolean; providedSummary?: LlmSummary; provisional?: boolean },
   ): Promise<SessionSummary> {
     await this.sem.acquire();
     try {
@@ -207,6 +212,7 @@ export class Summarizer {
         ...(this.runClaudeImpl ? { runClaudeImpl: this.runClaudeImpl } : {}),
         ...(this.minePrsImpl ? { minePrsImpl: this.minePrsImpl } : {}),
         ...(opts?.providedSummary ? { providedSummary: opts.providedSummary } : {}),
+        ...(opts?.provisional ? { provisional: true } : {}),
       };
       let lastErr: unknown = null;
       for (let attempt = 0; attempt <= this.retryDelaysMs.length; attempt++) {

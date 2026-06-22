@@ -17,8 +17,10 @@ import { logsCommand } from "./commands/logs.js";
 import { mcpCommand } from "./commands/mcp.js";
 import { nameCommand } from "./commands/name.js";
 import { openCommand } from "./commands/open.js";
+import { promptHookCommand } from "./commands/prompt-hook.js";
 import { runsCommand } from "./commands/runs.js";
 import { statusCommand } from "./commands/status.js";
+import { stopHookCommand } from "./commands/stop-hook.js";
 import { summarizeCommand } from "./commands/summarize.js";
 import { syncCommand } from "./commands/sync.js";
 import { watchCommand } from "./commands/watch.js";
@@ -176,6 +178,11 @@ const main = async (): Promise<void> => {
       "read an agent-authored summary (JSON) from stdin instead of claude -p",
       false,
     )
+    .option(
+      "--provisional",
+      "mark the agent summary as a provisional first-prompt title (model=heuristic)",
+      false,
+    )
     .option("--force", "bypass watermark/status gate", false)
     .option("--since <iso>", "only include sessions started at or after this ISO-8601 timestamp")
     .option("--yes", "skip the confirmation prompt", false)
@@ -186,6 +193,7 @@ const main = async (): Promise<void> => {
           all: boolean;
           current: boolean;
           fromAgent: boolean;
+          provisional: boolean;
           force: boolean;
           since?: string;
           yes: boolean;
@@ -198,6 +206,7 @@ const main = async (): Promise<void> => {
           all: opts.all,
           current: opts.current,
           fromAgent: opts.fromAgent,
+          provisional: opts.provisional,
           force: opts.force,
           ...(opts.since !== undefined ? { since: opts.since } : {}),
           yes: opts.yes,
@@ -292,16 +301,36 @@ const main = async (): Promise<void> => {
 
   program
     .command("install-hooks")
-    .description("Install the global SessionStart hook (`claude-sessions ensure`) into settings.")
+    .description(
+      "Install the global SessionStart + UserPromptSubmit + Stop hooks (ensure, provisional title, summary nudge) into settings.",
+    )
     .action(() => {
       process.exit(installHooksCommand());
     });
 
   program
     .command("uninstall-hooks")
-    .description("Remove the claude-sessions SessionStart hook from settings.")
+    .description(
+      "Remove the claude-sessions SessionStart + UserPromptSubmit + Stop hooks from settings.",
+    )
     .action(() => {
       process.exit(uninstallHooksCommand());
+    });
+
+  program
+    .command("stop-hook", { hidden: true })
+    .description("Stop-hook entry point: prompt the agent to author its session summary.")
+    .action(async () => {
+      const client = buildClient();
+      process.exit(await stopHookCommand({ client }));
+    });
+
+  program
+    .command("prompt-hook", { hidden: true })
+    .description("UserPromptSubmit-hook entry point: prompt the agent for a provisional title.")
+    .action(async () => {
+      const client = buildClient();
+      process.exit(await promptHookCommand({ client }));
     });
 
   await program.parseAsync(process.argv);

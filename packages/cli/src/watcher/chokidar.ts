@@ -3,10 +3,7 @@
 import { dirname } from "node:path";
 import { type FSWatcher, watch as chokidarWatch } from "chokidar";
 import { listRepos } from "../config/repos.js";
-import { readSessionMeta } from "../discover.js";
 import { findSessionsForRepo } from "../discover.js";
-import { SessionEndDetector } from "../summarizer/end-detect.js";
-import type { Summarizer } from "../summarizer/index.js";
 import { HttpError, type UploadClient } from "../upload/client.js";
 import { consumeFile } from "./consume.js";
 
@@ -17,6 +14,10 @@ import { consumeFile } from "./consume.js";
  *
  * `start()` does an initial catch-up pass before installing the chokidar
  * listener so REQ-013 (backfill on watcher start) is satisfied.
+ *
+ * The watcher only tails and uploads — it never summarizes. Summaries are
+ * authored by the in-loop agent (`summarize --from-agent`); there is no
+ * timer-based end-of-session trigger.
  */
 
 export interface JsonlWatcherOptions {
@@ -27,10 +28,6 @@ export interface JsonlWatcherOptions {
   chokidarFactory?: typeof chokidarWatch;
   /** Where to log warnings (default: console.error). */
   logger?: (msg: string) => void;
-  /** Summarizer to invoke after 60s of silence on a session. */
-  summarizer?: Summarizer;
-  /** Override silence ms (tests). */
-  silenceMs?: number;
 }
 
 const defaultDiscover = (): string[] => {
@@ -48,30 +45,15 @@ export class JsonlWatcher {
   private opts: JsonlWatcherOptions;
   private watcher: FSWatcher | null = null;
   private inflight = new Map<string, Promise<void>>();
-  private endDetector: SessionEndDetector | null = null;
-  /** path → sessionId so the end-detect callback knows what jsonl to read. */
-  private sessionPaths = new Map<string, string>();
 
   constructor(opts: JsonlWatcherOptions) {
     this.opts = opts;
-    if (opts.summarizer) {
-      const summarizer = opts.summarizer;
-      this.endDetector = new SessionEndDetector({
-        ...(opts.silenceMs !== undefined ? { silenceMs: opts.silenceMs } : {}),
-        onEnded: async (sessionId) => {
-          const path = this.sessionPaths.get(sessionId);
-          if (!path) return;
-          await summarizer.summarize(sessionId, path);
-        },
-      });
-    }
   }
 
   async start(): Promise<void> {
     const files = (this.opts.discover ?? defaultDiscover)();
-    // Catch-up pass first. Backfill must NOT arm the end-detect timer —
-    // pre-existing JSONLs are historical, not live activity (REQ-001).
-    for (const f of files) await this.consumeSafe(f, { armEndDetect: false });
+    // Catch-up pass first — backfill pre-existing JSONLs (REQ-013).
+    for (const f of files) await this.consumeSafe(f);
     // Then install live watcher on parent directories.
     const dirs = Array.from(new Set(files.map((f) => dirname(f))));
     if (dirs.length === 0) return;
@@ -83,7 +65,7 @@ export class JsonlWatcher {
     });
     const onChange = (p: string): void => {
       if (!p.endsWith(".jsonl")) return;
-      void this.consumeSafe(p, { armEndDetect: true });
+      void this.consumeSafe(p);
     };
     this.watcher.on("change", onChange);
     this.watcher.on("add", onChange);
@@ -94,7 +76,6 @@ export class JsonlWatcher {
       await this.watcher.close();
       this.watcher = null;
     }
-    this.endDetector?.cancelAll();
     await Promise.allSettled(this.inflight.values());
   }
 
@@ -103,8 +84,7 @@ export class JsonlWatcher {
     await Promise.allSettled(this.inflight.values());
   }
 
-  private async consumeSafe(path: string, opts?: { armEndDetect?: boolean }): Promise<void> {
-    const armEndDetect = opts?.armEndDetect !== false;
+  private async consumeSafe(path: string): Promise<void> {
     // Serialize per-file so a quick burst of writes doesn't trigger
     // overlapping consumes that would race on `state.json`.
     const prev = this.inflight.get(path) ?? Promise.resolve();
@@ -113,7 +93,6 @@ export class JsonlWatcher {
       .then(async () => {
         try {
           await consumeFile(path, this.opts.client);
-          if (armEndDetect) this.scheduleEndDetect(path);
         } catch (err) {
           const log = this.opts.logger ?? ((m) => console.error(m));
           if (err instanceof HttpError) {
@@ -130,13 +109,5 @@ export class JsonlWatcher {
       }),
     );
     await next;
-  }
-
-  private scheduleEndDetect(path: string): void {
-    if (!this.endDetector) return;
-    const meta = readSessionMeta(path);
-    if (!meta.session_id) return;
-    this.sessionPaths.set(meta.session_id, path);
-    this.endDetector.schedule(meta.session_id);
   }
 }

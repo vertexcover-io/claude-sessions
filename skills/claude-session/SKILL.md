@@ -22,9 +22,12 @@ serves a web UI + MCP search. This skill is the operator's guide to driving it.
 
 If you are unsure whether the CLI is set up, run `claude-sessions status`.
 
-**One-time setup:** `claude-sessions install-hooks` adds a global `SessionStart`
-hook (`claude-sessions ensure`) so every new session automatically verifies
-auth and starts the watcher. After that, capture is hands-off.
+**One-time setup:** `claude-sessions install-hooks` adds three global hooks:
+`SessionStart` (`claude-sessions ensure`) verifies auth and starts the watcher;
+`UserPromptSubmit` (`claude-sessions prompt-hook`) nudges you to author a
+provisional title on the first prompt; `Stop` (`claude-sessions stop-hook`)
+nudges you to author the full summary before a substantive session ends. After
+that, capture is hands-off.
 
 ## End-to-end workflow
 
@@ -46,7 +49,7 @@ Do these in order the first time; afterwards only the step you need.
    The JSON contract and field guidance are in `references/summaries.md`. The
    CLI merges deterministic facts (files touched, tool counts) on top of your
    narrative. You do NOT need to know the session id — `--current` resolves it.
-   If you don't summarize, the watcher daemon backfills it with `claude -p`.
+   A `Stop` hook prompts you to do this before a substantive session ends.
 6. **Push artifacts** — `claude-sessions artifacts <session-id>` uploads the
    **Markdown files** the agent created/edited so they show in the web Artifacts
    tab. See `references/artifacts.md` for what counts as an artifact and how.
@@ -77,7 +80,7 @@ Full per-command flag reference: `references/commands.md`.
 - "Resume an old session locally" → `fork <session-id> --until <event-uuid>`.
 
 `sync` uploads raw events; summarizing is a separate step. When **you** author
-the summary (`--from-agent`) it costs nothing extra; the `claude -p` backfill
+the summary (`--from-agent`) it costs nothing extra; the manual `claude -p`
 path is metered. Artifacts are independent of both — you can push artifacts for
 any synced session.
 
@@ -85,11 +88,11 @@ any synced session.
 
 - **Enable before sync.** `sync`/`summarize` only touch sessions in repos you
   have `enable`d. A "nothing to do" result usually means the repo isn't enabled.
-- **Agent summaries always win.** Your `--from-agent` summary is authoritative;
-  the daemon's `claude -p` backfill skips any session that already has a summary.
-- **`claude -p` backfill is metered.** Prefer a specific `<session-id>` over
-  `--all`; `--all` respects a watermark and skips already-summarized sessions
-  (override with `--force`).
+- **Agent summaries always win.** Your `--from-agent` summary is authoritative
+  and always written; the manual `claude -p` path respects a watermark and
+  skips sessions that already have one (override with `--force`).
+- **`claude -p` is metered and manual.** Prefer authoring summaries yourself;
+  when backfilling old sessions, prefer a specific `<session-id>` over `--all`.
 - **Artifacts are Markdown-only (for now).** Auto-derive keeps only `.md`/
   `.markdown` files the agent wrote; non-md paths are dropped with a warning,
   even when passed via `--file`/`--glob`. `--file`/`--glob` **replace** the

@@ -1,0 +1,154 @@
+// AI-generated. See PROMPT.md for the prompts and model used.
+
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Readable } from "node:stream";
+import type { CanonicalSession } from "@claude-sessions/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { stopHookCommand } from "../src/commands/stop-hook.js";
+import type { WatermarkState } from "../src/summarizer/index.js";
+import type { UploadClient } from "../src/upload/client.js";
+
+let dir: string;
+let transcript: string;
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "cs-stophook-"));
+  transcript = join(dir, "session.jsonl");
+  writeFileSync(transcript, "{}\n");
+});
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true });
+});
+
+const dummyClient = {} as unknown as UploadClient;
+
+const fakeSession = (n: number): CanonicalSession =>
+  ({
+    events: Array.from({ length: n }, (_, i) => ({ event_uuid: `e${i}` })),
+  }) as unknown as CanonicalSession;
+
+const captureStdout = (): { stream: NodeJS.WritableStream; get: () => string } => {
+  let data = "";
+  const stream = {
+    write: (s: string) => {
+      data += s;
+      return true;
+    },
+  } as unknown as NodeJS.WritableStream;
+  return { stream, get: () => data };
+};
+
+const run = async (
+  input: unknown,
+  opts: Partial<Parameters<typeof stopHookCommand>[0]> = {},
+): Promise<{ code: number; out: string }> => {
+  const out = captureStdout();
+  const raw = typeof input === "string" ? input : JSON.stringify(input);
+  const code = await stopHookCommand({
+    client: dummyClient,
+    stdin: Readable.from([raw]),
+    stdout: out.stream,
+    readSession: () => fakeSession(50),
+    readWatermarkImpl: async (): Promise<WatermarkState> => ({
+      summary: { status: "ok" } as WatermarkState["summary"],
+      fresh: false,
+      delta: 99,
+    }),
+    ...opts,
+  });
+  return { code, out: out.get() };
+};
+
+const isBlock = (out: string): boolean => {
+  if (!out.trim()) return false;
+  const parsed = JSON.parse(out) as { decision?: string; reason?: string };
+  return (
+    parsed.decision === "block" && typeof parsed.reason === "string" && parsed.reason.length > 0
+  );
+};
+
+describe("stopHookCommand", () => {
+  it("blocks once when a substantive session has no fresh summary", async () => {
+    const { code, out } = await run({
+      session_id: "sess-1",
+      transcript_path: transcript,
+      stop_hook_active: false,
+    });
+    expect(code).toBe(0);
+    expect(isBlock(out)).toBe(true);
+    expect(out).toContain("summarize --current --from-agent");
+  });
+
+  it("allows the stop when stop_hook_active is already true (loop guard)", async () => {
+    const { out } = await run({
+      session_id: "sess-1",
+      transcript_path: transcript,
+      stop_hook_active: true,
+    });
+    expect(isBlock(out)).toBe(false);
+    expect(out.trim()).toBe("");
+  });
+
+  it("allows the stop when a fresh summary already exists", async () => {
+    const { out } = await run(
+      { session_id: "sess-1", transcript_path: transcript, stop_hook_active: false },
+      {
+        readWatermarkImpl: async (): Promise<WatermarkState> => ({
+          summary: { status: "ok" } as WatermarkState["summary"],
+          fresh: true,
+          delta: 1,
+        }),
+      },
+    );
+    expect(isBlock(out)).toBe(false);
+  });
+
+  it("allows the stop for a trivial session below the activity threshold", async () => {
+    const { out } = await run(
+      { session_id: "sess-1", transcript_path: transcript, stop_hook_active: false },
+      { readSession: () => fakeSession(3) },
+    );
+    expect(isBlock(out)).toBe(false);
+  });
+
+  it("allows the stop when the watermark probe throws (unknown session / server down)", async () => {
+    const probe = vi.fn(async () => {
+      throw new Error("HTTP 404");
+    });
+    const { out } = await run(
+      { session_id: "sess-1", transcript_path: transcript, stop_hook_active: false },
+      {
+        readWatermarkImpl: probe as unknown as Parameters<
+          typeof stopHookCommand
+        >[0]["readWatermarkImpl"],
+      },
+    );
+    expect(probe).toHaveBeenCalled();
+    expect(isBlock(out)).toBe(false);
+  });
+
+  it("allows the stop when session_id or transcript_path is missing", async () => {
+    const a = await run({ transcript_path: transcript, stop_hook_active: false });
+    const b = await run({ session_id: "sess-1", stop_hook_active: false });
+    expect(isBlock(a.out)).toBe(false);
+    expect(isBlock(b.out)).toBe(false);
+  });
+
+  it("allows the stop when the transcript path does not exist", async () => {
+    const { out } = await run({
+      session_id: "sess-1",
+      transcript_path: join(dir, "missing.jsonl"),
+      stop_hook_active: false,
+    });
+    expect(isBlock(out)).toBe(false);
+  });
+
+  it("never throws on malformed stdin", async () => {
+    const { code, out } = await run("not json {{{");
+    expect(code).toBe(0);
+    expect(isBlock(out)).toBe(false);
+  });
+});

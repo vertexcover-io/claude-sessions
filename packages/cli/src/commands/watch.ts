@@ -1,22 +1,17 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { Summarizer } from "../summarizer/index.js";
 import type { UploadClient } from "../upload/client.js";
 import { JsonlWatcher } from "../watcher/chokidar.js";
 
 /**
- * The daemon's end-of-session summarization is a FALLBACK only: the in-loop
- * coding agent authors summaries directly (`summarize --from-agent`), and the
- * watcher's `claude -p` pass only fills gaps for sessions that have no summary
- * (backfill-only mode skips any session with an existing `ok` summary).
- * Set `CLAUDE_SESSIONS_SUMMARIZE=0` to disable the fallback entirely.
+ * The watcher only tails JSONL files and uploads new events. It never
+ * generates summaries: the in-loop coding agent authors them directly
+ * (`summarize --from-agent`, forced by the Stop hook), and `claude -p` is a
+ * manual last resort (`summarize <id>` / `--all`). There is no timer-based
+ * end-of-session trigger.
  */
-const summarizationEnabled = (): boolean => process.env.CLAUDE_SESSIONS_SUMMARIZE !== "0";
-
 export interface WatchOptions {
   client: UploadClient;
-  /** Disable summarization (tests). */
-  disableSummarizer?: boolean;
 }
 
 /**
@@ -24,14 +19,7 @@ export interface WatchOptions {
  * until SIGINT / SIGTERM, then closes the watcher cleanly.
  */
 export const watchCommand = async (opts: WatchOptions): Promise<number> => {
-  const summarizationOff = !summarizationEnabled() || opts.disableSummarizer;
-  const summarizer = summarizationOff
-    ? undefined
-    : new Summarizer({ upload: opts.client, backfillOnly: true });
-  const watcher = new JsonlWatcher({
-    client: opts.client,
-    ...(summarizer ? { summarizer } : {}),
-  });
+  const watcher = new JsonlWatcher({ client: opts.client });
   await watcher.start();
   process.stdout.write("watching for new events (ctrl-c to exit)...\n");
 
