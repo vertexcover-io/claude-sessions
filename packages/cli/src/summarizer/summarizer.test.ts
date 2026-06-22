@@ -398,3 +398,91 @@ describe("Summarizer watermark skip (REQ-003..REQ-006, REQ-012, REQ-013)", () =>
     expect(runPipeline).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Summarizer backfill-only mode + agent passthrough", () => {
+  it("backfillOnly: skips when an ok summary already exists (any delta)", async () => {
+    const upload = buildFakeUploadWithGet(async (id) =>
+      detailWithSummary(id, {
+        title: "agent title",
+        summary: "agent body",
+        tags: ["t"],
+        files_touched: ["a.ts"],
+        prs_referenced: [],
+        tool_call_counts: {},
+        status: "ok",
+        summarized_event_count: 5,
+      }),
+    );
+    const runPipeline = vi.fn();
+    const sum = new Summarizer({
+      upload: upload as unknown as UploadClient,
+      backfillOnly: true,
+      runPipeline,
+      // Even a huge delta must not trigger a re-summarize in backfill mode.
+      readSessionImpl: () => makeSession(9999),
+      logger: () => undefined,
+    });
+
+    const out = await sum.summarize("s-bf", "/tmp/x.jsonl");
+
+    expect(runPipeline).not.toHaveBeenCalled();
+    expect(out.status).toBe("ok");
+    expect(out.title).toBe("agent title");
+  });
+
+  it("backfillOnly: runs pipeline when no summary exists yet", async () => {
+    const upload = buildFakeUploadWithGet(async (id) => detailWithSummary(id, null));
+    const runPipeline = vi.fn().mockResolvedValue(buildOkSummary("s-bf2"));
+    const sum = new Summarizer({
+      upload: upload as unknown as UploadClient,
+      backfillOnly: true,
+      runPipeline,
+      readSessionImpl: () => makeSession(3),
+      logger: () => undefined,
+    });
+
+    await sum.summarize("s-bf2", "/tmp/x.jsonl");
+
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+  });
+
+  it("agent providedSummary bypasses the watermark gate and is forwarded to the pipeline", async () => {
+    const upload = buildFakeUploadWithGet(async (id) =>
+      detailWithSummary(id, {
+        title: "old",
+        summary: "old",
+        tags: [],
+        files_touched: [],
+        prs_referenced: [],
+        tool_call_counts: {},
+        status: "ok",
+        summarized_event_count: 100,
+      }),
+    );
+    const runPipeline = vi.fn(async (id: string, deps: { providedSummary?: unknown }) => {
+      expect(deps.providedSummary).toBeDefined();
+      return buildOkSummary(id);
+    });
+    const sum = new Summarizer({
+      upload: upload as unknown as UploadClient,
+      backfillOnly: true,
+      runPipeline,
+      readSessionImpl: () => makeSession(100),
+      logger: () => undefined,
+    });
+
+    await sum.summarize("s-agent", "/tmp/x.jsonl", {
+      providedSummary: {
+        title: "Agent",
+        summary: "Agent body",
+        tags: [],
+        files_touched: [],
+        prs_referenced: [],
+      },
+    });
+
+    expect(runPipeline).toHaveBeenCalledTimes(1);
+    // The agent path is authoritative: it must not consult the watermark.
+    expect((upload.getSession as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+  });
+});

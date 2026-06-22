@@ -4,7 +4,7 @@ import { readSessionSync } from "@claude-sessions/adapter-claude";
 import type { CanonicalSession, SessionSummary } from "@claude-sessions/core";
 import { HttpError, type UploadClient } from "../upload/client.js";
 import type { runClaude } from "./claude-runner.js";
-import { type PipelineDeps, summarizeAndUpload } from "./pipeline.js";
+import { type LlmSummary, type PipelineDeps, summarizeAndUpload } from "./pipeline.js";
 import type { minePrs } from "./pr-mining.js";
 
 export { SessionEndDetector } from "./end-detect.js";
@@ -17,7 +17,8 @@ export {
   buildPromptUserMessage,
   TRUNCATION_MARKER,
 } from "./prompt.js";
-export { summarizeAndUpload } from "./pipeline.js";
+export { summarizeAndUpload, parseAgentSummary } from "./pipeline.js";
+export type { LlmSummary } from "./pipeline.js";
 
 /**
  * Concurrency cap: at most 2 `claude -p` invocations in flight at any
@@ -92,6 +93,12 @@ export interface SummarizerOptions {
   minResumarizeDelta?: number;
   /** Inject a custom session reader (tests). Defaults to `readSessionSync`. */
   readSessionImpl?: (path: string) => CanonicalSession;
+  /**
+   * Backfill-only mode (the watcher daemon's fallback `claude -p` path).
+   * Skip if ANY `ok` summary already exists, regardless of event delta — so
+   * an agent-authored summary is never overwritten by the fallback.
+   */
+  backfillOnly?: boolean;
 }
 
 /**
@@ -110,6 +117,7 @@ export class Summarizer {
   private minePrsImpl: typeof minePrs | undefined;
   private minResumarizeDelta: number;
   private readSessionImpl: (path: string) => CanonicalSession;
+  private backfillOnly: boolean;
 
   constructor(opts: SummarizerOptions) {
     this.upload = opts.upload;
@@ -121,10 +129,32 @@ export class Summarizer {
     this.minePrsImpl = opts.minePrsImpl;
     this.minResumarizeDelta = opts.minResumarizeDelta ?? 5;
     this.readSessionImpl = opts.readSessionImpl ?? readSessionSync;
+    this.backfillOnly = opts.backfillOnly ?? false;
   }
 
   inFlight(): number {
     return this.sem.inFlight();
+  }
+
+  private buildSkipSummary(
+    sessionId: string,
+    s: NonNullable<Awaited<ReturnType<UploadClient["getSession"]>>["summary"]>,
+  ): SessionSummary {
+    return {
+      session_id: sessionId,
+      title: s.title ?? "",
+      summary: s.summary ?? "",
+      tags: s.tags,
+      files_touched: s.files_touched,
+      prs_referenced: s.prs_referenced,
+      tool_call_counts: s.tool_call_counts,
+      generated_at: new Date().toISOString(),
+      model: "unknown",
+      status: "ok",
+      ...(s.summarized_event_count != null
+        ? { summarized_event_count: s.summarized_event_count }
+        : {}),
+    };
   }
 
   private async checkWatermarkSkip(
@@ -134,7 +164,13 @@ export class Summarizer {
     try {
       const existing = await this.upload.getSession(sessionId);
       const s = existing.summary;
-      if (!s || s.status !== "ok" || s.summarized_event_count == null) return null;
+      if (!s || s.status !== "ok") return null;
+      // Backfill-only: any existing `ok` summary wins (agent-authored or prior).
+      if (this.backfillOnly) {
+        this.logger(`summarize skipped for ${sessionId}: backfill-only, ok summary exists`);
+        return this.buildSkipSummary(sessionId, s);
+      }
+      if (s.summarized_event_count == null) return null;
       const session = this.readSessionImpl(jsonlPath);
       const currentCount = session.events.length;
       const delta = currentCount - s.summarized_event_count;
@@ -142,19 +178,7 @@ export class Summarizer {
       this.logger(
         `summarize skipped for ${sessionId}: delta=${delta} < ${this.minResumarizeDelta}`,
       );
-      return {
-        session_id: sessionId,
-        title: s.title ?? "",
-        summary: s.summary ?? "",
-        tags: s.tags,
-        files_touched: s.files_touched,
-        prs_referenced: s.prs_referenced,
-        tool_call_counts: s.tool_call_counts,
-        generated_at: new Date().toISOString(),
-        model: "unknown",
-        status: "ok",
-        summarized_event_count: s.summarized_event_count,
-      };
+      return this.buildSkipSummary(sessionId, s);
     } catch (err) {
       this.logger(
         `watermark check failed for ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -166,11 +190,13 @@ export class Summarizer {
   async summarize(
     sessionId: string,
     jsonlPath: string,
-    opts?: { force?: boolean },
+    opts?: { force?: boolean; providedSummary?: LlmSummary },
   ): Promise<SessionSummary> {
     await this.sem.acquire();
     try {
-      if (opts?.force !== true) {
+      // Agent-authored summaries are authoritative: always write, never gate.
+      const isAgent = opts?.providedSummary !== undefined;
+      if (!isAgent && opts?.force !== true) {
         const skip = await this.checkWatermarkSkip(sessionId, jsonlPath);
         if (skip) return skip;
       }
@@ -180,6 +206,7 @@ export class Summarizer {
         recordLogger: this.logger,
         ...(this.runClaudeImpl ? { runClaudeImpl: this.runClaudeImpl } : {}),
         ...(this.minePrsImpl ? { minePrsImpl: this.minePrsImpl } : {}),
+        ...(opts?.providedSummary ? { providedSummary: opts.providedSummary } : {}),
       };
       let lastErr: unknown = null;
       for (let attempt = 0; attempt <= this.retryDelaysMs.length; attempt++) {

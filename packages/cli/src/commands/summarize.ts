@@ -1,10 +1,11 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { listRepos } from "../config/repos.js";
-import { findSessionsForRepo, readSessionMeta } from "../discover.js";
-import { Summarizer } from "../summarizer/index.js";
+import { claudeProjectsRoot, findSessionsForRepo, readSessionMeta } from "../discover.js";
+import { type LlmSummary, Summarizer, parseAgentSummary } from "../summarizer/index.js";
 import type { SessionDetail, UploadClient } from "../upload/client.js";
 
 // TODO: refine from summarization_runs averages
@@ -25,8 +26,14 @@ export interface SummarizeCommandOpts {
   force?: boolean;
   since?: string;
   yes?: boolean;
+  /** Read an agent-authored summary (JSON) from stdin instead of running `claude -p`. */
+  fromAgent?: boolean;
+  /** Target the active session for the current working directory. */
+  current?: boolean;
   summarizerFactory?: (client: UploadClient) => Pick<Summarizer, "summarize">;
   discover?: () => DiscoveredSummarizable[];
+  /** Resolve the current-cwd session (tests). Defaults to a projects-dir scan. */
+  resolveCurrent?: (cwd: string) => DiscoveredSummarizable | null;
   stdin?: NodeJS.ReadableStream;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -54,8 +61,51 @@ const defaultDiscover = (): DiscoveredSummarizable[] => {
 
 const writeUsage = (stderr: NodeJS.WritableStream): void => {
   stderr.write(
-    "usage: claude-sessions summarize <session-id> | --all [--force] [--since <iso>] [--yes]\n",
+    "usage: claude-sessions summarize (<session-id> | --current | --all) [--from-agent] [--force] [--since <iso>] [--yes]\n",
   );
+};
+
+/**
+ * Resolve the active session for `cwd`: the newest JSONL under the projects
+ * root whose first-line `cwd` matches. Used by `--current` so the in-loop
+ * agent can summarize its own session without knowing the id.
+ */
+const resolveCurrentSession = (cwd: string): DiscoveredSummarizable | null => {
+  const root = claudeProjectsRoot();
+  if (!existsSync(root)) return null;
+  let best: { session_id: string; path: string; mtime: number } | null = null;
+  for (const sub of readdirSync(root)) {
+    const subDir = join(root, sub);
+    try {
+      if (!statSync(subDir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    for (const name of readdirSync(subDir)) {
+      if (!name.endsWith(".jsonl")) continue;
+      const full = join(subDir, name);
+      let mtime: number;
+      try {
+        const st = statSync(full);
+        if (!st.isFile()) continue;
+        mtime = st.mtimeMs;
+      } catch {
+        continue;
+      }
+      const meta = readSessionMeta(full);
+      if (meta.cwd !== cwd || !meta.session_id) continue;
+      if (!best || mtime > best.mtime) {
+        best = { session_id: meta.session_id, path: full, mtime };
+      }
+    }
+  }
+  return best ? { session_id: best.session_id, path: best.path } : null;
+};
+
+const readStdin = async (stdin: NodeJS.ReadableStream): Promise<string> => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8");
 };
 
 const promptYesNo = async (
@@ -116,9 +166,17 @@ export const summarizeCommand = async (opts: SummarizeCommandOpts): Promise<numb
   const stderr = opts.stderr ?? process.stderr;
 
   const hasId = typeof opts.sessionId === "string" && opts.sessionId.length > 0;
+  const wantCurrent = opts.current === true;
   const wantAll = opts.all === true;
-  if (hasId === wantAll) {
+  const fromAgent = opts.fromAgent === true;
+
+  // Exactly one of <session-id> / --current / --all.
+  if ([hasId, wantCurrent, wantAll].filter(Boolean).length !== 1) {
     writeUsage(stderr);
+    return 2;
+  }
+  if (fromAgent && wantAll) {
+    stderr.write("--from-agent requires a single session (use <session-id> or --current)\n");
     return 2;
   }
 
@@ -126,17 +184,43 @@ export const summarizeCommand = async (opts: SummarizeCommandOpts): Promise<numb
     ? opts.summarizerFactory(opts.client)
     : new Summarizer({ upload: opts.client });
   const discover = opts.discover ?? defaultDiscover;
+  const resolveCurrent = opts.resolveCurrent ?? resolveCurrentSession;
 
-  if (hasId) {
-    const sessionId = opts.sessionId as string;
-    const all = discover();
-    const found = all.find((s) => s.session_id === sessionId);
-    if (!found) {
-      stderr.write(`Session not found: ${sessionId}\n`);
-      return 1;
+  if (hasId || wantCurrent) {
+    let single: DiscoveredSummarizable | null;
+    if (wantCurrent) {
+      single = resolveCurrent(process.cwd());
+      if (!single) {
+        stderr.write("no active session found for the current directory\n");
+        return 1;
+      }
+    } else {
+      const sessionId = opts.sessionId as string;
+      single = discover().find((s) => s.session_id === sessionId) ?? null;
+      if (!single) {
+        stderr.write(`Session not found: ${sessionId}\n`);
+        return 1;
+      }
     }
+
+    let providedSummary: LlmSummary | undefined;
+    if (fromAgent) {
+      const raw = await readStdin(stdin);
+      try {
+        providedSummary = parseAgentSummary(JSON.parse(raw));
+      } catch (err) {
+        stderr.write(
+          `invalid agent summary: ${err instanceof Error ? err.message : String(err)}\n`,
+        );
+        return 1;
+      }
+    }
+
     try {
-      await summarizer.summarize(sessionId, found.path, { force: opts.force === true });
+      await summarizer.summarize(single.session_id, single.path, {
+        force: opts.force === true,
+        ...(providedSummary ? { providedSummary } : {}),
+      });
       return 0;
     } catch (err) {
       stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
