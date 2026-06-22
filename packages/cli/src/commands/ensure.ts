@@ -1,0 +1,95 @@
+// AI-generated. See PROMPT.md for the prompts and model used.
+
+import { fileURLToPath } from "node:url";
+import { detectRepo } from "@claude-sessions/core";
+import { isWatcherAlive, startWatcherDaemon, watchLogPath } from "../config/daemon.js";
+import { getRepo } from "../config/repos.js";
+import { ensureAuthenticated } from "./_pair.js";
+
+const DEFAULT_SERVER_URL = "http://localhost:3000";
+
+export interface EnsureOptions {
+  serverUrl?: string;
+  /** Working directory to check (defaults to process.cwd()). */
+  cwd?: string;
+  /** Override the spawned daemon entry point (tests). */
+  cliEntry?: string;
+  /** Skip starting the daemon (tests). */
+  skipDaemon?: boolean;
+  fetchImpl?: typeof fetch;
+  stdout?: NodeJS.WritableStream;
+  stderr?: NodeJS.WritableStream;
+}
+
+const resolveCliEntry = (): string => fileURLToPath(new URL("../main.js", import.meta.url));
+
+/** Emit a SessionStart hook payload that injects guidance into the session. */
+const emitContext = (stdout: NodeJS.WritableStream, lines: string[]): void => {
+  if (lines.length === 0) return;
+  stdout.write(
+    `${JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: lines.join("\n"),
+      },
+    })}\n`,
+  );
+};
+
+/**
+ * `claude-sessions ensure` — the SessionStart hook entry point. Verifies the
+ * CLI is authenticated and the watcher daemon is running, and surfaces a
+ * prompt (via the hook's additionalContext) when the cwd repo isn't enabled.
+ *
+ * Non-interactive and best-effort: it NEVER blocks the session — it always
+ * exits 0, degrading to a warning when capture can't be turned on.
+ */
+export const ensureCommand = async (opts: EnsureOptions = {}): Promise<number> => {
+  const serverUrl = (opts.serverUrl ?? DEFAULT_SERVER_URL).replace(/\/+$/, "");
+  const cwd = opts.cwd ?? process.cwd();
+  const stdout = opts.stdout ?? process.stdout;
+  const stderr = opts.stderr ?? process.stderr;
+
+  // 1. Auth (non-interactive — never triggers browser pairing).
+  const auth = await ensureAuthenticated({
+    serverUrl,
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+  });
+  if (!auth) {
+    stderr.write("claude-sessions: not authenticated — run `claude-sessions login`\n");
+    emitContext(stdout, [
+      "Claude-sessions session capture is OFF: the CLI is not authenticated. Tell the user to run `claude-sessions login` to enable capturing this and future sessions.",
+    ]);
+    return 0;
+  }
+
+  // 2. Watcher daemon (detached singleton; returns instantly).
+  if (!opts.skipDaemon && !isWatcherAlive()) {
+    try {
+      const pid = startWatcherDaemon({ cliEntry: opts.cliEntry ?? resolveCliEntry() });
+      stderr.write(`claude-sessions: started watcher (pid ${pid}). logs: ${watchLogPath()}\n`);
+    } catch (err) {
+      stderr.write(
+        `claude-sessions: failed to start watcher: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
+  // 3. Is the current repo enabled for capture?
+  const context: string[] = [];
+  const id = detectRepo(cwd);
+  if (id) {
+    const entry = getRepo(id.canonical_url);
+    if (!entry || !entry.enabled) {
+      context.push(
+        `This repository (${id.canonical_url}) is not enabled for claude-sessions capture, so this session will not be saved. Ask the user whether to enable capture for this repo; if they agree, run \`claude-sessions enable\`.`,
+      );
+    } else {
+      context.push(
+        "Claude-sessions capture is active for this repo. After completing any significant task (a feature, fix, or refactor — not every small edit), author and push a session summary with `claude-sessions summarize --current --from-agent`. Use the `claude-session` skill to learn how to write the summary JSON and how this tool works (summaries, artifacts, commands).",
+      );
+    }
+  }
+  emitContext(stdout, context);
+  return 0;
+};
