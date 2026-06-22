@@ -7,6 +7,7 @@ import { type AuthVariables, buildRequireAuth } from "../auth/middleware.js";
 import type { DbClient } from "../db/client.js";
 import {
   events,
+  artifacts,
   embeddings,
   repos,
   sessionBlobs,
@@ -62,6 +63,13 @@ const summarizationRunSchema = z.object({
 });
 
 const MAX_BLOB_BYTES = 100 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES = 5 * 1024 * 1024;
+
+const artifactSchema = z.object({
+  path: z.string().min(1),
+  mime_type: z.string().min(1),
+  content: z.string(),
+});
 
 const ensureString = (s: unknown): string => (typeof s === "string" ? s : "");
 
@@ -529,6 +537,137 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
   });
 
   /**
+   * POST /api/sessions/:id/artifacts — store one artifact (a file the agent
+   * created/edited during the session) as text. Upserts on (session_id, path)
+   * so re-pushing is idempotent. Defense-in-depth redaction is applied to the
+   * content (the CLI already redacts before upload). Owner-only RBAC.
+   */
+  router.post("/:id/artifacts", async (c) => {
+    const user = c.get("user");
+    const sessionId = c.req.param("id");
+    const parsed = artifactSchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
+    const body = parsed.data;
+
+    const sessRows = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .limit(1);
+    if (!sessRows[0]) return c.json({ error: "session not found" }, 404);
+
+    const safeContent = ensureString(redactDeep(body.content));
+    const bytes = Buffer.from(safeContent, "utf8");
+    if (bytes.byteLength > MAX_ARTIFACT_BYTES) {
+      return c.json({ error: "artifact too large" }, 413);
+    }
+
+    const inserted = await db
+      .insert(artifacts)
+      .values({
+        sessionId,
+        path: body.path,
+        mimeType: body.mime_type,
+        bytes,
+        byteSize: bytes.byteLength,
+      })
+      .onConflictDoUpdate({
+        target: [artifacts.sessionId, artifacts.path],
+        set: {
+          mimeType: body.mime_type,
+          bytes,
+          byteSize: bytes.byteLength,
+          uploadedAt: sql`now()`,
+        },
+      })
+      .returning({ id: artifacts.id });
+
+    return c.json({ ok: true, id: inserted[0]?.id ?? null, byte_size: bytes.byteLength });
+  });
+
+  /**
+   * GET /api/sessions/:id/artifacts — list artifact metadata (no bytes) for
+   * the web Artifacts tab. Owner-only RBAC; empty for private sessions.
+   */
+  router.get("/:id/artifacts", async (c) => {
+    const user = c.get("user");
+    const sessionId = c.req.param("id");
+
+    const sessRows = await db
+      .select({ id: sessions.id, isPrivate: sessions.isPrivate })
+      .from(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .limit(1);
+    const sess = sessRows[0];
+    if (!sess) return c.json({ error: "session not found" }, 404);
+    if (sess.isPrivate) return c.json({ artifacts: [] });
+
+    const rows = await db
+      .select({
+        id: artifacts.id,
+        path: artifacts.path,
+        mimeType: artifacts.mimeType,
+        byteSize: artifacts.byteSize,
+        uploadedAt: artifacts.uploadedAt,
+      })
+      .from(artifacts)
+      .where(eq(artifacts.sessionId, sessionId))
+      .orderBy(asc(artifacts.path));
+
+    return c.json({
+      artifacts: rows.map((r) => ({
+        id: r.id,
+        path: r.path,
+        mime_type: r.mimeType,
+        byte_size: r.byteSize,
+        uploaded_at: r.uploadedAt.toISOString(),
+      })),
+    });
+  });
+
+  /**
+   * GET /api/sessions/:id/artifacts/:artifactId — return one artifact's text
+   * content (decoded utf8) for the web modal viewer. Owner-only RBAC; writes
+   * an audit_log row before responding.
+   */
+  router.get("/:id/artifacts/:artifactId", async (c) => {
+    const user = c.get("user");
+    const sessionId = c.req.param("id");
+    const artifactId = c.req.param("artifactId");
+
+    const sessRows = await db
+      .select({ id: sessions.id, isPrivate: sessions.isPrivate })
+      .from(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .limit(1);
+    const sess = sessRows[0];
+    if (!sess) return c.json({ error: "session not found" }, 404);
+    if (sess.isPrivate) return c.json({ error: "artifact not found" }, 404);
+
+    const rows = await db
+      .select({
+        id: artifacts.id,
+        path: artifacts.path,
+        mimeType: artifacts.mimeType,
+        bytes: artifacts.bytes,
+      })
+      .from(artifacts)
+      .where(and(eq(artifacts.sessionId, sessionId), eq(artifacts.id, artifactId)))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return c.json({ error: "artifact not found" }, 404);
+
+    await writeAudit(db, c, "read_artifact", sessionId, { path: row.path });
+
+    return c.json({
+      id: row.id,
+      path: row.path,
+      mime_type: row.mimeType,
+      content: row.bytes.toString("utf8"),
+    });
+  });
+
+  /**
    * GET /api/sessions/:id — return session metadata + summary, resolved
    * `display_name` (user-set name → LLM title → `Session <prefix>`), and
    * the `is_private` flag. Owner-only RBAC. Writes an audit_log row
@@ -646,6 +785,7 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
         await tx.delete(summaries).where(eq(summaries.sessionId, sessionId));
         await tx.delete(embeddings).where(eq(embeddings.sessionId, sessionId));
         await tx.delete(sessionBlobs).where(eq(sessionBlobs.sessionId, sessionId));
+        await tx.delete(artifacts).where(eq(artifacts.sessionId, sessionId));
         await tx
           .update(sessions)
           .set({ isPrivate: true, hasBlob: false, updatedAt: sql`now()` })

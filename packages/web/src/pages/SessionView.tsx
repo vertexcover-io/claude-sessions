@@ -1,19 +1,26 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { Activity, ArrowLeft, GitFork, MessageSquare, Wrench } from "lucide-react";
+import { Activity, ArrowLeft, FileText, GitFork, MessageSquare, Wrench } from "lucide-react";
 import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ForkModal } from "../components/ForkModal";
+import { ArtifactsPanel } from "../components/transcript/ArtifactsPanel";
 import { CommitsPanel } from "../components/transcript/CommitsPanel";
 import { StickyHeader } from "../components/transcript/StickyHeader";
 import { SummaryPanel } from "../components/transcript/SummaryPanel";
 import { TimelineView } from "../components/transcript/TimelineView";
 import { ToolsView } from "../components/transcript/ToolsView";
 import { TranscriptList } from "../components/transcript/TranscriptList";
-import { useSession, useSessionCommits, useSessionEvents, useSessionToolCalls } from "../lib/api";
+import {
+  useSession,
+  useSessionArtifacts,
+  useSessionCommits,
+  useSessionEvents,
+  useSessionToolCalls,
+} from "../lib/api";
 import { cn } from "../lib/cn";
 
-type Tab = "timeline" | "conversation" | "tools";
+type Tab = "timeline" | "conversation" | "tools" | "artifacts";
 
 const TabButton = ({
   active,
@@ -45,6 +52,7 @@ export const SessionView = () => {
   const events = useSessionEvents(id);
   const toolCalls = useSessionToolCalls(id);
   const commits = useSessionCommits(id);
+  const artifacts = useSessionArtifacts(id);
   const [forkOpen, setForkOpen] = useState(false);
   const [tab, setTab] = useState<Tab>("timeline");
 
@@ -56,6 +64,7 @@ export const SessionView = () => {
   }
   const data = session.data;
   const toolCount = toolCalls.data?.tool_calls.length ?? 0;
+  const artifactCount = artifacts.data?.artifacts.length ?? 0;
 
   return (
     <div className="flex flex-col h-full" data-testid="session-view">
@@ -99,6 +108,12 @@ export const SessionView = () => {
             <span className="text-xs text-muted-foreground tabular-nums">{toolCount}</span>
           )}
         </TabButton>
+        <TabButton active={tab === "artifacts"} onClick={() => setTab("artifacts")}>
+          <FileText size={14} /> Artifacts
+          {artifactCount > 0 && (
+            <span className="text-xs text-muted-foreground tabular-nums">{artifactCount}</span>
+          )}
+        </TabButton>
       </div>
 
       {tab === "timeline" && (
@@ -125,6 +140,12 @@ export const SessionView = () => {
             <div className="p-8 text-center text-sm text-muted-foreground">Loading tool calls…</div>
           )}
           {toolCalls.data && <ToolsView pairs={toolCalls.data.tool_calls} />}
+        </div>
+      )}
+
+      {tab === "artifacts" && id && (
+        <div className="flex-1 overflow-auto">
+          <ArtifactsPanel sessionId={id} />
         </div>
       )}
 

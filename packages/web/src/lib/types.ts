@@ -122,6 +122,21 @@ export interface ToolCallPair {
   duration_ms: number | null;
 }
 
+export interface ArtifactMeta {
+  id: string;
+  path: string;
+  mime_type: string;
+  byte_size: number;
+  uploaded_at: string;
+}
+
+export interface ArtifactContent {
+  id: string;
+  path: string;
+  mime_type: string;
+  content: string;
+}
+
 export interface SearchResult {
   session_id: string;
   title: string | null;
