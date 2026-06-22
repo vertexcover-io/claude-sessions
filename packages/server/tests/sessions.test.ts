@@ -10,6 +10,7 @@ import {
   artifacts,
   auditLog,
   embeddings,
+  learnings,
   sessionBlobs,
   sessions,
   summaries,
@@ -272,6 +273,159 @@ describe("POST /api/sessions/:id/summary", () => {
       .from(embeddings)
       .where(eq(embeddings.sessionId, sessionId));
     expect(embedRows).toHaveLength(0);
+  });
+});
+
+describe("learnings on POST /api/sessions/:id/summary + GET /:id", () => {
+  const aLearning = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    title: "Marked done without running tests",
+    episode_event_uuids: ["u-3", "u-6"],
+    what_went_wrong: "Reported the work finished before running any tests.",
+    what_would_have_prevented: "Run the suite and read the result before reporting done.",
+    root_cause: "missing_verification",
+    attributed_to: "agent",
+    confidence: 0.95,
+    severity: "high",
+    ...over,
+  });
+
+  const rowsFor = (sessionId: string) =>
+    db.db.select().from(learnings).where(eq(learnings.sessionId, sessionId));
+
+  it("inserts learnings, stamps provenance, and returns them via GET", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "learn-1@example.test",
+      repoUrl: "github.com/example/learn-1",
+    });
+    const sessionId = "session-learn-1";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const body = buildSummaryBody(sessionId);
+    body.summarized_event_count = 47;
+    body.learnings = [aLearning()];
+    const res = await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    expect(res.status).toBe(200);
+
+    const rows = await rowsFor(sessionId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.rootCause).toBe("missing_verification");
+    expect(rows[0]?.model).toBe("sonnet");
+    expect(rows[0]?.summarizedEventCount).toBe(47);
+
+    const getRes = await get(`/api/sessions/${sessionId}`, seed.token);
+    const json = (await getRes.json()) as {
+      learnings: Array<{ root_cause: string; episode_event_uuids: string[] }>;
+    };
+    expect(json.learnings).toHaveLength(1);
+    expect(json.learnings[0]?.root_cause).toBe("missing_verification");
+    expect(json.learnings[0]?.episode_event_uuids).toEqual(["u-3", "u-6"]);
+  });
+
+  it("delete-and-replaces on re-push (no duplicates)", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "learn-replace@example.test",
+      repoUrl: "github.com/example/learn-replace",
+    });
+    const sessionId = "session-learn-replace";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const body = buildSummaryBody(sessionId);
+    body.learnings = [aLearning(), aLearning({ title: "Second" })];
+    await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    expect(await rowsFor(sessionId)).toHaveLength(2);
+
+    body.learnings = [aLearning({ title: "Only one now" })];
+    await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    const rows = await rowsFor(sessionId);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.title).toBe("Only one now");
+  });
+
+  it("clears learnings when an empty array is pushed", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "learn-clear@example.test",
+      repoUrl: "github.com/example/learn-clear",
+    });
+    const sessionId = "session-learn-clear";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const body = buildSummaryBody(sessionId);
+    body.learnings = [aLearning()];
+    await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    expect(await rowsFor(sessionId)).toHaveLength(1);
+
+    body.learnings = [];
+    await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    expect(await rowsFor(sessionId)).toHaveLength(0);
+  });
+
+  it("leaves existing learnings untouched when the field is omitted", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "learn-omit@example.test",
+      repoUrl: "github.com/example/learn-omit",
+    });
+    const sessionId = "session-learn-omit";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const body = buildSummaryBody(sessionId);
+    body.learnings = [aLearning()];
+    await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+
+    const without = buildSummaryBody(sessionId);
+    // no learnings field
+    await post(`/api/sessions/${sessionId}/summary`, seed.token, without);
+    expect(await rowsFor(sessionId)).toHaveLength(1);
+  });
+
+  it("does not wipe learnings on a failed summary re-run", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "learn-failed@example.test",
+      repoUrl: "github.com/example/learn-failed",
+    });
+    const sessionId = "session-learn-failed";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const ok = buildSummaryBody(sessionId);
+    ok.learnings = [aLearning()];
+    await post(`/api/sessions/${sessionId}/summary`, seed.token, ok);
+
+    const failed = buildSummaryBody(sessionId);
+    failed.status = "failed";
+    failed.learnings = [];
+    await post(`/api/sessions/${sessionId}/summary`, seed.token, failed);
+    expect(await rowsFor(sessionId)).toHaveLength(1);
+  });
+
+  it("redacts secrets in learning text fields", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "learn-redact@example.test",
+      repoUrl: "github.com/example/learn-redact",
+    });
+    const sessionId = "session-learn-redact";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const body = buildSummaryBody(sessionId);
+    body.learnings = [
+      aLearning({ what_went_wrong: "leaked AKIA9876543210FEDCBA in the log output." }),
+    ];
+    await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    const rows = await rowsFor(sessionId);
+    expect(rows[0]?.whatWentWrong).not.toContain("AKIA9876543210FEDCBA");
+    expect(rows[0]?.whatWentWrong).toContain("[REDACTED:");
+  });
+
+  it("rejects a learning with no evidence uuids (400)", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "learn-bad@example.test",
+      repoUrl: "github.com/example/learn-bad",
+    });
+    const sessionId = "session-learn-bad";
+    await insertSession(sessionId, seed.user.id, seed.repoId);
+
+    const body = buildSummaryBody(sessionId);
+    body.learnings = [aLearning({ episode_event_uuids: [] })];
+    const res = await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    expect(res.status).toBe(400);
   });
 });
 

@@ -105,9 +105,10 @@ const PairedToolCard = ({ pair }: { pair: PairedTool }) => {
 interface TimelineRowProps {
   dotClass: string;
   children: React.ReactNode;
+  id?: string;
 }
-const TimelineRow = ({ dotClass, children }: TimelineRowProps) => (
-  <div className="timeline-row">
+const TimelineRow = ({ dotClass, children, id }: TimelineRowProps) => (
+  <div className="timeline-row" id={id}>
     <span className={cn("timeline-dot", dotClass)} aria-hidden />
     {children}
   </div>
@@ -165,7 +166,11 @@ export const TimelineView = ({ events }: Props) => {
           const text = (ev.payload.content_md ?? "") as string;
           if (!text.trim()) return null;
           return (
-            <TimelineRow key={ev.event_uuid} dotClass="timeline-dot-user">
+            <TimelineRow
+              key={ev.event_uuid}
+              id={`evt-${ev.event_uuid}`}
+              dotClass="timeline-dot-user"
+            >
               <div className="msg-user">
                 <div className="flex items-center gap-2 mb-1.5">
                   <span className="role-badge role-badge-user">
@@ -186,7 +191,11 @@ export const TimelineView = ({ events }: Props) => {
           if (!text.trim()) return null;
           const model = (ev.payload.model ?? null) as string | null;
           return (
-            <TimelineRow key={ev.event_uuid} dotClass="timeline-dot-assistant">
+            <TimelineRow
+              key={ev.event_uuid}
+              id={`evt-${ev.event_uuid}`}
+              dotClass="timeline-dot-assistant"
+            >
               <div className="msg-assistant">
                 <div className="flex items-center gap-2 mb-1.5">
                   <span className="role-badge role-badge-assistant">
@@ -216,6 +225,7 @@ export const TimelineView = ({ events }: Props) => {
           return (
             <TimelineRow
               key={ev.event_uuid}
+              id={`evt-${ev.event_uuid}`}
               dotClass={isError ? "timeline-dot-tool-error" : "timeline-dot-tool"}
             >
               <PairedToolCard pair={pair} />

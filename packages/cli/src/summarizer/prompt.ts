@@ -23,6 +23,43 @@ export const SUMMARY_SCHEMA = {
     tags: { type: "array", items: { type: "string" }, minItems: 0 },
     files_touched: { type: "array", items: { type: "string" } },
     prs_referenced: { type: "array", items: { type: "string" } },
+    learnings: {
+      type: "array",
+      minItems: 0,
+      items: {
+        type: "object",
+        required: [
+          "title",
+          "episode_event_uuids",
+          "what_went_wrong",
+          "what_would_have_prevented",
+          "root_cause",
+          "attributed_to",
+          "confidence",
+        ],
+        additionalProperties: false,
+        properties: {
+          title: { type: "string", maxLength: 80 },
+          episode_event_uuids: { type: "array", items: { type: "string" }, minItems: 1 },
+          what_went_wrong: { type: "string" },
+          what_would_have_prevented: { type: "string" },
+          root_cause: {
+            type: "string",
+            enum: [
+              "underspecified_request",
+              "instruction_not_followed",
+              "missing_verification",
+              "task_derailment",
+              "context_loss",
+              "environment_or_tooling",
+            ],
+          },
+          attributed_to: { type: "string", enum: ["user", "agent", "shared", "environment"] },
+          confidence: { type: "number", minimum: 0, maximum: 1 },
+          severity: { type: "string", enum: ["low", "medium", "high"] },
+        },
+      },
+    },
   },
 } as const;
 
@@ -36,6 +73,14 @@ export const SYSTEM_PROMPT = [
   "- tags: 3-8 lowercase-kebab-case labels (free-form folksonomy)",
   "- files_touched: paths the session created, modified, or read with intent — drop incidental reads",
   "- prs_referenced: PR URLs that were opened, mentioned, or implied",
+  "- learnings: OPTIONAL array of failure episodes. Include one record ONLY when the transcript",
+  "  shows a concrete divergence (a user correction, a tool/test/build failure, a reopened task, a",
+  "  revert over the agent's edits). Be evidence-anchored: every record MUST cite >=1 event_uuid in",
+  "  episode_event_uuids. Omit the field or use [] for a clean session — never invent failures.",
+  "  Per record: title (<=80 chars headline); what_went_wrong and what_would_have_prevented as",
+  "  DESCRIPTIVE multi-sentence prose (situation, action, expectation gap, why; then the corrective",
+  "  principle with reasoning — not one-line fixes); root_cause and attributed_to from the enums;",
+  "  confidence 0..1; optional severity (low|medium|high).",
   "",
   "tool_call_counts is computed deterministically and merged in by the post-processor; do not regenerate it.",
 ].join("\n");

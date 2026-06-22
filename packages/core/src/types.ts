@@ -164,6 +164,7 @@ export interface SessionSummary {
   status: "pending" | "ok" | "failed";
   error?: string;
   summarized_event_count?: number;
+  learnings?: SessionLearning[];
 }
 
 /**
@@ -178,4 +179,46 @@ export interface InterventionEvent {
   kind: string;
   excerpt: string;
   severity: "low" | "medium" | "high";
+}
+
+/**
+ * Single root-cause classifier for a per-session learning. Deliberately not
+ * MAST's 14-mode enum: most modes target multi-agent systems, and the ones
+ * that apply collapse onto these 1:1. `task_derailment` is "model drift".
+ */
+export type RootCause =
+  | "underspecified_request"
+  | "instruction_not_followed"
+  | "missing_verification"
+  | "task_derailment"
+  | "context_loss"
+  | "environment_or_tooling";
+
+/** Who/what the divergence is attributed to. Orthogonal to `RootCause`. */
+export type AttributedTo = "user" | "agent" | "shared" | "environment";
+
+/**
+ * A per-session learning: one diagnosed failure episode, grounded in
+ * transcript evidence. Evidence-anchored — `episodeEventUuids` must cite at
+ * least one observed `event_uuid` (a user correction, tool failure, reopened
+ * task). No evidence → no record.
+ *
+ * `what_went_wrong` and `what_would_have_prevented` are descriptive markdown
+ * (narrative paragraphs explaining context, action, expectation gap, and the
+ * corrective principle), NOT one-line fixes. `title` is the short scannable
+ * headline used for the card/list/anchor.
+ *
+ * Snake_case to match the wire convention of the other core types
+ * (`SessionSummary`, `InterventionEvent`) — these are uploaded as JSON and
+ * round-trip through the server unchanged.
+ */
+export interface SessionLearning {
+  title: string;
+  episode_event_uuids: string[];
+  what_went_wrong: string;
+  what_would_have_prevented: string;
+  root_cause: RootCause;
+  attributed_to: AttributedTo;
+  confidence: number;
+  severity?: "low" | "medium" | "high";
 }

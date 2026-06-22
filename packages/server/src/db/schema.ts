@@ -10,6 +10,7 @@ import {
   numeric,
   pgTable,
   primaryKey,
+  real,
   text,
   timestamp,
   uniqueIndex,
@@ -174,6 +175,31 @@ export const artifacts = pgTable(
   (t) => ({
     sessionPathUniq: uniqueIndex("artifacts_session_path_uniq").on(t.sessionId, t.path),
     sessionUploadedIdx: index("idx_artifacts_session_uploaded").on(t.sessionId, t.uploadedAt),
+  }),
+);
+
+export const learnings = pgTable(
+  "learnings",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    episodeEventUuids: textArray("episode_event_uuids").notNull().default(sql`'{}'::text[]`),
+    whatWentWrong: text("what_went_wrong").notNull(),
+    whatWouldHavePrevented: text("what_would_have_prevented").notNull(),
+    rootCause: text("root_cause").notNull(),
+    attributedTo: text("attributed_to").notNull(),
+    confidence: real("confidence").notNull(),
+    severity: text("severity"),
+    model: text("model"),
+    generatedAt: timestamp("generated_at", { withTimezone: true, mode: "date" }),
+    summarizedEventCount: integer("summarized_event_count"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  },
+  (t) => ({
+    sessionIdx: index("idx_learnings_session").on(t.sessionId, t.createdAt),
   }),
 );
 

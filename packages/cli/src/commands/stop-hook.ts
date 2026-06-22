@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { readSessionSync } from "@claude-sessions/adapter-claude";
 import type { CanonicalSession } from "@claude-sessions/core";
 import { readWatermark } from "../summarizer/index.js";
+import { detectSignals, renderSignalAnchors } from "../summarizer/signals.js";
 import type { UploadClient } from "../upload/client.js";
 
 /**
@@ -62,7 +63,11 @@ const SUMMARY_REASON =
   "Before stopping, author a concise summary of this session as JSON and push it so the work " +
   "is captured: run `claude-sessions summarize --current --from-agent` with the summary on stdin " +
   "(the claude-session skill documents the schema). Authoring it yourself keeps the summary " +
-  "agent-written instead of falling back to a separate `claude -p` pass.";
+  "agent-written instead of falling back to a separate `claude -p` pass. If this session had " +
+  "failure episodes (a user correction, a tool/test failure, a reopened task, a revert), include " +
+  "a `learnings` array: one evidence-anchored record per episode, each citing ≥1 event_uuid, with " +
+  "descriptive `what_went_wrong` / `what_would_have_prevented` prose, a `root_cause`, " +
+  "`attributed_to`, and `confidence`. Use `[]` when the session was clean.";
 
 const readStdin = async (stdin: NodeJS.ReadableStream): Promise<string> => {
   const chunks: Buffer[] = [];
@@ -92,13 +97,13 @@ export const stopHookCommand = async (opts: StopHookOptions): Promise<number> =>
   if (!sessionId || !transcriptPath || !existsSync(transcriptPath)) return 0;
 
   // Activity threshold: trivial sessions aren't worth a summary.
-  let eventCount: number;
+  let session: CanonicalSession;
   try {
-    eventCount = (opts.readSession ?? readSessionSync)(transcriptPath).events.length;
+    session = (opts.readSession ?? readSessionSync)(transcriptPath);
   } catch {
     return 0;
   }
-  if (eventCount < minEvents) return 0;
+  if (session.events.length < minEvents) return 0;
 
   // A fresh summary already exists (e.g. the agent just pushed one, or we
   // blocked a moment ago) — allow the stop.
@@ -115,6 +120,16 @@ export const stopHookCommand = async (opts: StopHookOptions): Promise<number> =>
     return 0;
   }
 
-  stdout.write(`${JSON.stringify({ decision: "block", reason: SUMMARY_REASON })}\n`);
+  // Stage-1 signal detection: hand the agent deterministic evidence anchors
+  // (computed over the full JSONL) so long sessions stay diagnosable. Fail
+  // open — a detector hiccup must never wedge the session shut.
+  let reason = SUMMARY_REASON;
+  try {
+    reason += renderSignalAnchors(detectSignals(session));
+  } catch {
+    // ignore — keep the base reason.
+  }
+
+  stdout.write(`${JSON.stringify({ decision: "block", reason })}\n`);
   return 0;
 };

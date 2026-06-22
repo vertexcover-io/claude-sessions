@@ -119,7 +119,9 @@ const SimpleTranscript = ({ events }: Props) => (
     style={{ maxHeight: "calc(100vh - 56px)" }}
   >
     {events.map((event) => (
-      <div key={event.event_uuid}>{renderEvent(event)}</div>
+      <div key={event.event_uuid} id={`evt-${event.event_uuid}`}>
+        {renderEvent(event)}
+      </div>
     ))}
   </div>
 );
@@ -153,6 +155,7 @@ const VirtualizedTranscript = ({ events }: Props) => {
           return (
             <div
               key={event.event_uuid}
+              id={`evt-${event.event_uuid}`}
               data-index={virt.index}
               ref={virtualizer.measureElement}
               style={{

@@ -49,7 +49,10 @@ Do these in order the first time; afterwards only the step you need.
    The JSON contract and field guidance are in `references/summaries.md`. The
    CLI merges deterministic facts (files touched, tool counts) on top of your
    narrative. You do NOT need to know the session id — `--current` resolves it.
-   A `Stop` hook prompts you to do this before a substantive session ends.
+   A `Stop` hook prompts you to do this before a substantive session ends. If
+   the session had failure episodes, include an evidence-anchored `learnings`
+   array in the same JSON (see `references/summaries.md`); read them back with
+   `claude-sessions learnings <session-id>`.
 6. **Push artifacts** — `claude-sessions artifacts <session-id>` uploads the
    **Markdown files** the agent created/edited so they show in the web Artifacts
    tab. See `references/artifacts.md` for what counts as an artifact and how.

@@ -9,6 +9,7 @@ import {
   events,
   artifacts,
   embeddings,
+  learnings,
   repos,
   sessionBlobs,
   sessionCommits,
@@ -20,6 +21,24 @@ import { getEmbedProvider } from "../embed/index.js";
 import type { Env } from "../env.js";
 import { writeAudit } from "../lib/audit.js";
 import { redactDeep } from "../redact.js";
+
+const learningSchema = z.object({
+  title: z.string().min(1),
+  episode_event_uuids: z.array(z.string()).min(1),
+  what_went_wrong: z.string().min(1),
+  what_would_have_prevented: z.string().min(1),
+  root_cause: z.enum([
+    "underspecified_request",
+    "instruction_not_followed",
+    "missing_verification",
+    "task_derailment",
+    "context_loss",
+    "environment_or_tooling",
+  ]),
+  attributed_to: z.enum(["user", "agent", "shared", "environment"]),
+  confidence: z.number().min(0).max(1),
+  severity: z.enum(["low", "medium", "high"]).optional(),
+});
 
 const summarySchema = z.object({
   session_id: z.string().min(1),
@@ -34,6 +53,7 @@ const summarySchema = z.object({
   status: z.enum(["pending", "ok", "failed"]),
   error: z.string().optional(),
   summarized_event_count: z.number().int().nonnegative().optional(),
+  learnings: z.array(learningSchema).optional(),
 });
 
 const patchSchema = z.object({
@@ -350,6 +370,28 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
     const safeTitle = ensureString(redactDeep(body.title));
     const safeSummary = ensureString(redactDeep(body.summary));
 
+    // Learnings ride the summary body. We replace the whole set only on an
+    // `ok` summary that actually carries `learnings` — an omitted field leaves
+    // existing rows untouched (a failed/partial re-run must not wipe good
+    // learnings), while `[]` is an explicit "clean session" that clears them.
+    const replaceLearnings = body.status === "ok" && body.learnings !== undefined;
+    const safeLearnings = (body.learnings ?? []).map((l) => ({
+      sessionId,
+      title: ensureString(redactDeep(l.title)),
+      episodeEventUuids: (redactDeep(l.episode_event_uuids) as unknown[]).map((u) =>
+        ensureString(u),
+      ),
+      whatWentWrong: ensureString(redactDeep(l.what_went_wrong)),
+      whatWouldHavePrevented: ensureString(redactDeep(l.what_would_have_prevented)),
+      rootCause: l.root_cause,
+      attributedTo: l.attributed_to,
+      confidence: l.confidence,
+      severity: l.severity ?? null,
+      model: body.model,
+      generatedAt: new Date(body.generated_at),
+      summarizedEventCount: body.summarized_event_count ?? null,
+    }));
+
     const provider = getEmbedProvider();
     let vector: number[] | null = null;
     if (body.status === "ok") {
@@ -406,6 +448,13 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
             target: embeddings.sessionId,
             set: { embedding: vector, embeddingModel: provider.name },
           });
+      }
+
+      if (replaceLearnings) {
+        await tx.delete(learnings).where(eq(learnings.sessionId, sessionId));
+        if (safeLearnings.length > 0) {
+          await tx.insert(learnings).values(safeLearnings);
+        }
       }
     });
 
@@ -706,6 +755,12 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
       .limit(1);
     const summary = summaryRows[0] ?? null;
 
+    const learningRows = await db
+      .select()
+      .from(learnings)
+      .where(eq(learnings.sessionId, sessionId))
+      .orderBy(asc(learnings.createdAt));
+
     const displayName = sess.name ?? summary?.title ?? `Session ${sess.id.slice(0, 8)}`;
 
     await writeAudit(db, c, "read_session", sessionId);
@@ -744,6 +799,20 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
             model: summary.model ?? null,
           }
         : null,
+      learnings: learningRows.map((l) => ({
+        id: l.id,
+        title: l.title,
+        episode_event_uuids: l.episodeEventUuids,
+        what_went_wrong: l.whatWentWrong,
+        what_would_have_prevented: l.whatWouldHavePrevented,
+        root_cause: l.rootCause,
+        attributed_to: l.attributedTo,
+        confidence: l.confidence,
+        severity: l.severity ?? null,
+        model: l.model ?? null,
+        generated_at: l.generatedAt ? l.generatedAt.toISOString() : null,
+        summarized_event_count: l.summarizedEventCount ?? null,
+      })),
     });
   });
 

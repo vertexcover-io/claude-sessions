@@ -12,7 +12,12 @@ export type {
   CanonicalSession,
   SessionSummary,
   InterventionEvent,
+  RootCause,
+  AttributedTo,
+  SessionLearning,
 } from "./types.js";
+
+export { renderLearningsMarkdown } from "./render-learnings.js";
 
 export { computeCostUsd, matchFamily } from "./pricing.js";
 export type { UsageBlock } from "./pricing.js";
