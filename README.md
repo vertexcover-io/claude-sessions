@@ -2,6 +2,22 @@
 
 A personal-cloud product for indexing, summarizing, and searching Claude Code sessions across all your machines. The CLI watches `~/.claude/projects/**/*.jsonl`, redacts secrets, ingests events into a Postgres-backed server, generates per-session summaries with `claude -p`, and exposes the index through a web UI, REST API, and MCP server.
 
+## Install
+
+One line clones this repo, builds the CLI, puts `claude-sessions` on your PATH, installs the `claude-session` skill, and wires the Claude Code hooks. Needs `git`, `bun`, and `node` 22+.
+
+```sh
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/vertexcover-io/claude-sessions/main/install.sh | bash
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/vertexcover-io/claude-sessions/main/install.ps1 | iex
+```
+
+Scripts: [`install.sh`](install.sh) (macOS/Linux) · [`install.ps1`](install.ps1) (Windows). See [Quickstart — CLI](#quickstart--cli) for what gets installed, env overrides, and next steps (`login`, `enable`).
+
 ## Architecture
 
 ```
