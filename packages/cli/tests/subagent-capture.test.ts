@@ -129,10 +129,16 @@ describe("subagent capture (CAPTURE track)", () => {
 
       const events = ingestPayloads().flatMap(
         (p) =>
-          (p as { events?: { type?: string; payload?: { agent_id?: string } }[] }).events ?? [],
+          (
+            p as {
+              events?: { type?: string; payload?: { tool?: string; agent_id?: string } }[];
+            }
+          ).events ?? [],
       );
-      const toolEvent = events.find((e) => e.payload?.agent_id !== undefined);
-      expect(toolEvent?.payload?.agent_id).toBe(agentId);
+      // The web reads agent_id off the Agent *call* event (tool === "Agent"),
+      // not the tool_result. The streaming upload path must propagate it there.
+      const callEvent = events.find((e) => e.payload?.tool === "Agent");
+      expect(callEvent?.payload?.agent_id).toBe(agentId);
     } finally {
       repo.cleanup();
     }

@@ -11,3 +11,4 @@ coverage/
 *.pid
 *.pgid
 .claude/
+.playwright-mcp/

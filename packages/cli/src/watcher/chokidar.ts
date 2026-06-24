@@ -76,10 +76,29 @@ const defaultDiscover = (): string[] => {
   return Array.from(out);
 };
 
+/**
+ * Only LIVE-watch the `subagents/` dir of a *recently active* main session.
+ * Old sessions never spawn new subagents, and registering an inotify watch
+ * for every historical subagents dir exhausts the system watch limit
+ * (ENOSPC), which would crash the watcher. The startup catch-up pass already
+ * backfilled every historical subagent transcript, and `ensureSubagentWatch`
+ * registers dirs on the fly as sessions become active.
+ */
+const LIVE_WATCH_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+const modifiedWithin = (path: string, maxAgeMs: number): boolean => {
+  try {
+    return Date.now() - statSync(path).mtimeMs < maxAgeMs;
+  } catch {
+    return false;
+  }
+};
+
 export class JsonlWatcher {
   private opts: JsonlWatcherOptions;
   private watcher: FSWatcher | null = null;
   private inflight = new Map<string, Promise<void>>();
+  private watchedSubagentDirs = new Set<string>();
 
   constructor(opts: JsonlWatcherOptions) {
     this.opts = opts;
@@ -87,16 +106,24 @@ export class JsonlWatcher {
 
   async start(): Promise<void> {
     const files = (this.opts.discover ?? defaultDiscover)();
-    // Catch-up pass first — backfill pre-existing JSONLs (REQ-013).
+    // Catch-up pass first — backfill pre-existing JSONLs (REQ-013). This
+    // includes historical subagent transcripts, so we do NOT need a live
+    // watch on every historical subagents dir (that would exhaust inotify).
     for (const f of files) await this.consumeSafe(f);
-    // Then install live watcher on parent directories. For each discovered
-    // main JSONL, also watch its `subagents/` dir so newly-spawned subagent
-    // transcripts fire `add`/`change` (consumeFile self-detects the path).
-    const dirSet = new Set(files.map((f) => dirname(f)));
+    // Live watch: the parent dir of every main JSONL, plus the subagents dir
+    // of recently-active sessions only. Newly-active sessions register their
+    // subagents dir on the fly via `ensureSubagentWatch`.
+    const dirSet = new Set<string>();
     for (const f of files) {
       if (basename(dirname(f)) === "subagents") continue;
-      const subDir = join(f.replace(/\.jsonl$/, ""), "subagents");
-      if (existsSync(subDir)) dirSet.add(subDir);
+      dirSet.add(dirname(f));
+      if (modifiedWithin(f, LIVE_WATCH_MAX_AGE_MS)) {
+        const subDir = join(f.replace(/\.jsonl$/, ""), "subagents");
+        if (existsSync(subDir)) {
+          dirSet.add(subDir);
+          this.watchedSubagentDirs.add(subDir);
+        }
+      }
     }
     const dirs = Array.from(dirSet);
     if (dirs.length === 0) return;
@@ -106,12 +133,44 @@ export class JsonlWatcher {
       ignoreInitial: true,
       depth: 1,
     });
+    // Never let a watcher-level error (e.g. ENOSPC from the inotify limit)
+    // crash the process — log it and keep tailing whatever did register.
+    this.watcher.on("error", (err: unknown) => {
+      const log = this.opts.logger ?? ((m) => console.error(m));
+      log(`watch error (continuing): ${(err as Error)?.message ?? err}`);
+    });
     const onChange = (p: string): void => {
       if (!p.endsWith(".jsonl")) return;
+      // An active main session may spawn subagents — start watching its
+      // subagents dir so their transcripts are captured live.
+      this.ensureSubagentWatch(p);
       void this.consumeSafe(p);
     };
     this.watcher.on("change", onChange);
     this.watcher.on("add", onChange);
+  }
+
+  /** Lazily register a live watch on a main session's `subagents/` dir the
+   *  first time we see that session active, so subagents spawned after the
+   *  watcher started are captured — without pre-watching every historical
+   *  dir at startup (which would hit the inotify limit). */
+  private ensureSubagentWatch(mainFile: string): void {
+    if (!this.watcher) return;
+    if (basename(dirname(mainFile)) === "subagents") return;
+    const subDir = join(mainFile.replace(/\.jsonl$/, ""), "subagents");
+    if (this.watchedSubagentDirs.has(subDir)) return;
+    if (!existsSync(subDir)) return;
+    this.watchedSubagentDirs.add(subDir);
+    const log = this.opts.logger ?? ((m) => console.error(m));
+    try {
+      this.watcher.add(subDir);
+    } catch (err) {
+      log(`subagent watch skipped for ${subDir}: ${(err as Error)?.message ?? err}`);
+      return;
+    }
+    // Backfill any subagent transcripts already present — chokidar won't
+    // re-emit pre-existing files when a dir is added after startup.
+    for (const sub of subagentFilesFor(mainFile)) void this.consumeSafe(sub);
   }
 
   async stop(): Promise<void> {
