@@ -1,7 +1,8 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { readFileSync, statSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
   AssistantMsgEvent,
@@ -413,5 +414,122 @@ describe("system / attachment lines preserve structured data", () => {
     const events = parseLine(line) as SystemEvent[];
     expect(events[0]?.kind).toBe("turn_duration");
     expect(events[0]?.data).toEqual({ durationMs: 111891, messageCount: 63 });
+  });
+});
+
+describe("agent_id — subagent launch link (CAPTURE)", () => {
+  it("extracts agent_id from a tool_result text block onto the result event", () => {
+    const line = JSON.stringify({
+      type: "user",
+      uuid: "u-agent",
+      parentUuid: "a-agent",
+      timestamp: "2026-05-09T10:00:03.000Z",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tu-agent",
+            content: [
+              { type: "text", text: "Async agent launched successfully.\nagentId: deadbeef" },
+            ],
+            is_error: false,
+          },
+        ],
+      },
+    });
+    const events = parseLine(line);
+    expect(events).toHaveLength(1);
+    const tool = events[0] as ToolUseEvent;
+    expect(tool.type).toBe("tool_use");
+    expect(tool.agent_id).toBe("deadbeef");
+  });
+
+  it("merges agent_id onto the paired Agent call event in readSessionSync", () => {
+    const call = JSON.stringify({
+      type: "assistant",
+      uuid: "a-agent",
+      parentUuid: "u-0",
+      timestamp: "2026-05-09T10:00:01.000Z",
+      sessionId: "sess-parent",
+      cwd: "/repo",
+      message: {
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content: [{ type: "tool_use", id: "tu-agent", name: "Agent", input: { prompt: "go" } }],
+        usage: { input_tokens: 5, output_tokens: 2 },
+      },
+    });
+    const result = JSON.stringify({
+      type: "user",
+      uuid: "u-agent",
+      parentUuid: "a-agent",
+      timestamp: "2026-05-09T10:00:02.000Z",
+      sessionId: "sess-parent",
+      cwd: "/repo",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "tu-agent",
+            content:
+              "Async agent launched successfully.\nagentId: a782c5e94c0f7ae85 (internal ...)",
+          },
+        ],
+      },
+    });
+    const tmp = join(mkdtempSync(join(tmpdir(), "adapter-agentid-")), "session.jsonl");
+    writeFileSync(tmp, `${call}\n${result}\n`);
+    try {
+      const session = readSessionSync(tmp);
+      const agentCall = session.events.find(
+        (e): e is ToolUseEvent => e.type === "tool_use" && e.tool === "Agent",
+      );
+      expect(agentCall).toBeDefined();
+      expect(agentCall?.agent_id).toBe("a782c5e94c0f7ae85");
+    } finally {
+      rmSync(dirname(tmp), { recursive: true, force: true });
+    }
+  });
+
+  it("parses a sidechain transcript (isSidechain:true) into a normal event list", () => {
+    const lines = [
+      {
+        type: "user",
+        uuid: "sc-1",
+        parentUuid: null,
+        timestamp: "2026-05-09T10:00:00.000Z",
+        sessionId: "sess-parent",
+        cwd: "/repo",
+        isSidechain: true,
+        message: { role: "user", content: "do the subtask" },
+      },
+      {
+        type: "assistant",
+        uuid: "sc-2",
+        parentUuid: "sc-1",
+        timestamp: "2026-05-09T10:00:01.000Z",
+        sessionId: "sess-parent",
+        cwd: "/repo",
+        isSidechain: true,
+        message: {
+          role: "assistant",
+          model: "claude-sonnet-4-6",
+          content: [{ type: "text", text: "done" }],
+          usage: { input_tokens: 3, output_tokens: 1 },
+        },
+      },
+    ];
+    const tmp = join(mkdtempSync(join(tmpdir(), "adapter-sidechain-")), "agent-x.jsonl");
+    writeFileSync(tmp, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
+    try {
+      const session = readSessionSync(tmp);
+      expect(session.events).toHaveLength(2);
+      expect(session.events[0]?.type).toBe("user_msg");
+      expect(session.events[1]?.type).toBe("assistant_msg");
+    } finally {
+      rmSync(dirname(tmp), { recursive: true, force: true });
+    }
   });
 });

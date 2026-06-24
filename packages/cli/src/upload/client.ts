@@ -15,6 +15,8 @@ export interface IngestSessionMeta {
   agent: "claude-code";
   agent_version: string;
   repo: { canonical_url: string; branch: string | null };
+  /** Set when this is a captured subagent transcript; == the parent's id. */
+  parent_session_id?: string;
   source_cwd_hint: string;
   started_at: string;
   ended_at: string;

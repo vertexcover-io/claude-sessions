@@ -16,6 +16,7 @@ import { ArtifactsPanel } from "../components/transcript/ArtifactsPanel";
 import { CommitsPanel } from "../components/transcript/CommitsPanel";
 import { LearningsPanel } from "../components/transcript/LearningsPanel";
 import { StickyHeader } from "../components/transcript/StickyHeader";
+import { SubagentBackBar } from "../components/transcript/SubagentBackBar";
 import { SummaryPanel } from "../components/transcript/SummaryPanel";
 import { TimelineView } from "../components/transcript/TimelineView";
 import { ToolsView } from "../components/transcript/ToolsView";
@@ -30,6 +31,11 @@ import {
 import { cn } from "../lib/cn";
 
 type Tab = "timeline" | "conversation" | "tools" | "artifacts" | "learnings";
+
+interface SubagentFrame {
+  sessionId: string;
+  anchorEventUuid: string;
+}
 
 const TabButton = ({
   active,
@@ -56,21 +62,39 @@ const TabButton = ({
 );
 
 export const SessionView = () => {
-  const { id } = useParams<{ id: string }>();
-  const session = useSession(id);
-  const events = useSessionEvents(id);
-  const toolCalls = useSessionToolCalls(id);
-  const commits = useSessionCommits(id);
-  const artifacts = useSessionArtifacts(id);
+  const { id: rootId } = useParams<{ id: string }>();
+  // Drill-in stack: each frame is a subagent transcript plus the parent row to
+  // restore when popping back. The active session id is the deepest frame, or
+  // the root when the stack is empty.
+  const [stack, setStack] = useState<SubagentFrame[]>([]);
+  const activeSessionId = stack.at(-1)?.sessionId ?? rootId;
+  const inSubagent = stack.length > 0;
+
+  // Session metadata (header, summary, commits, artifacts, learnings) always
+  // reflects the ROOT session — subagents are transcript-only. Only the
+  // transcript/timeline/tools data follows the active (possibly nested) id.
+  const session = useSession(rootId);
+  const events = useSessionEvents(activeSessionId);
+  const toolCalls = useSessionToolCalls(activeSessionId);
+  const commits = useSessionCommits(rootId);
+  const artifacts = useSessionArtifacts(rootId);
   const [forkOpen, setForkOpen] = useState(false);
   const [tab, setTab] = useState<Tab>("timeline");
   const jumpTarget = useRef<string | null>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
 
-  // Deep-link from a learning's evidence into the transcript. The Timeline tab
-  // renders every event type (incl. tool failures) and is not virtualized, so
-  // the anchor element exists once it mounts. Scroll + flash after the switch.
+  // Deep-link into the transcript: a learning's evidence, or the originating
+  // Agent row restored on Back. The Timeline view renders every event type
+  // (incl. tool failures) and is not virtualized, so the anchor element exists
+  // once it mounts. In subagent mode the timeline renders regardless of `tab`,
+  // so we only require that a timeline is on screen. Scroll + flash.
   useEffect(() => {
-    if (tab !== "timeline" || !jumpTarget.current) return;
+    if (!jumpTarget.current) return;
+    // `activeSessionId` is read so the effect re-fires after any transcript
+    // swap — including popping a middle crumb, which keeps the view in
+    // subagent mode but changes which transcript is mounted.
+    if (!activeSessionId) return;
+    if (!inSubagent && tab !== "timeline") return;
     const uuid = jumpTarget.current;
     jumpTarget.current = null;
     const raf = requestAnimationFrame(() => {
@@ -81,11 +105,27 @@ export const SessionView = () => {
       setTimeout(() => el.classList.remove("evt-flash"), 1600);
     });
     return () => cancelAnimationFrame(raf);
-  }, [tab]);
+  }, [tab, inSubagent, activeSessionId]);
 
   const handleJumpToEvent = useCallback((eventUuid: string) => {
     jumpTarget.current = eventUuid;
     setTab("timeline");
+  }, []);
+
+  const handleEnterSubagent = useCallback((agentId: string, parentEventUuid: string) => {
+    setStack((s) => [...s, { sessionId: agentId, anchorEventUuid: parentEventUuid }]);
+    requestAnimationFrame(() => transcriptRef.current?.scrollTo({ top: 0 }));
+  }, []);
+
+  // Pop to `depth` frames (0 = back to root). After the parent transcript
+  // re-renders, land on the row we came from by reusing the jump+flash effect.
+  const popTo = useCallback((depth: number) => {
+    setStack((s) => {
+      if (depth >= s.length) return s;
+      const restore = s[depth];
+      if (restore) jumpTarget.current = restore.anchorEventUuid;
+      return s.slice(0, depth);
+    });
   }, []);
 
   if (session.isLoading) {
@@ -123,79 +163,114 @@ export const SessionView = () => {
         </div>
       </div>
 
-      {data.summary && <SummaryPanel session={data} summary={data.summary} />}
+      {inSubagent ? (
+        <>
+          <SubagentBackBar
+            stack={stack}
+            onBackToMain={() => popTo(0)}
+            onPopTo={(depth) => popTo(depth)}
+          />
+          <div ref={transcriptRef} className="flex-1 overflow-auto">
+            {events.isLoading && (
+              <div className="p-8 text-center text-sm text-muted-foreground">Loading subagent…</div>
+            )}
+            {events.data && (
+              <TimelineView events={events.data.events} onEnterSubagent={handleEnterSubagent} />
+            )}
+          </div>
+          <ForkModal open={forkOpen} onClose={() => setForkOpen(false)} session={data} />
+        </>
+      ) : (
+        <>
+          {data.summary && <SummaryPanel session={data} summary={data.summary} />}
 
-      {commits.data?.commits && commits.data.commits.length > 0 && (
-        <CommitsPanel commits={commits.data.commits} />
-      )}
-
-      <div className="px-4 pt-3 flex items-center gap-2 border-b border-border pb-3">
-        <TabButton active={tab === "timeline"} onClick={() => setTab("timeline")}>
-          <Activity size={14} /> Timeline
-        </TabButton>
-        <TabButton active={tab === "conversation"} onClick={() => setTab("conversation")}>
-          <MessageSquare size={14} /> Conversation
-        </TabButton>
-        <TabButton active={tab === "tools"} onClick={() => setTab("tools")}>
-          <Wrench size={14} /> Tools
-          {toolCount > 0 && (
-            <span className="text-xs text-muted-foreground tabular-nums">{toolCount}</span>
+          {commits.data?.commits && commits.data.commits.length > 0 && (
+            <CommitsPanel commits={commits.data.commits} />
           )}
-        </TabButton>
-        <TabButton active={tab === "artifacts"} onClick={() => setTab("artifacts")}>
-          <FileText size={14} /> Artifacts
-          {artifactCount > 0 && (
-            <span className="text-xs text-muted-foreground tabular-nums">{artifactCount}</span>
+
+          <div className="px-4 pt-3 flex items-center gap-2 border-b border-border pb-3">
+            <TabButton active={tab === "timeline"} onClick={() => setTab("timeline")}>
+              <Activity size={14} /> Timeline
+            </TabButton>
+            <TabButton active={tab === "conversation"} onClick={() => setTab("conversation")}>
+              <MessageSquare size={14} /> Conversation
+            </TabButton>
+            <TabButton active={tab === "tools"} onClick={() => setTab("tools")}>
+              <Wrench size={14} /> Tools
+              {toolCount > 0 && (
+                <span className="text-xs text-muted-foreground tabular-nums">{toolCount}</span>
+              )}
+            </TabButton>
+            <TabButton active={tab === "artifacts"} onClick={() => setTab("artifacts")}>
+              <FileText size={14} /> Artifacts
+              {artifactCount > 0 && (
+                <span className="text-xs text-muted-foreground tabular-nums">{artifactCount}</span>
+              )}
+            </TabButton>
+            <TabButton active={tab === "learnings"} onClick={() => setTab("learnings")}>
+              <Lightbulb size={14} /> Learnings
+              {learningCount > 0 && (
+                <span className="text-xs text-muted-foreground tabular-nums">{learningCount}</span>
+              )}
+            </TabButton>
+          </div>
+
+          {tab === "timeline" && (
+            <div ref={transcriptRef} className="flex-1 overflow-auto">
+              {events.isLoading && (
+                <div className="p-8 text-center text-sm text-muted-foreground">
+                  Loading timeline…
+                </div>
+              )}
+              {events.data && (
+                <TimelineView events={events.data.events} onEnterSubagent={handleEnterSubagent} />
+              )}
+            </div>
           )}
-        </TabButton>
-        <TabButton active={tab === "learnings"} onClick={() => setTab("learnings")}>
-          <Lightbulb size={14} /> Learnings
-          {learningCount > 0 && (
-            <span className="text-xs text-muted-foreground tabular-nums">{learningCount}</span>
+
+          {tab === "conversation" && (
+            <div className="flex-1 overflow-auto">
+              {events.isLoading && (
+                <div className="p-8 text-center text-sm text-muted-foreground">
+                  Loading transcript…
+                </div>
+              )}
+              {events.data && (
+                <TranscriptList
+                  events={events.data.events}
+                  conversationOnly
+                  onEnterSubagent={handleEnterSubagent}
+                />
+              )}
+            </div>
           )}
-        </TabButton>
-      </div>
 
-      {tab === "timeline" && (
-        <div className="flex-1 overflow-auto">
-          {events.isLoading && (
-            <div className="p-8 text-center text-sm text-muted-foreground">Loading timeline…</div>
+          {tab === "tools" && (
+            <div className="flex-1 overflow-auto">
+              {toolCalls.isLoading && (
+                <div className="p-8 text-center text-sm text-muted-foreground">
+                  Loading tool calls…
+                </div>
+              )}
+              {toolCalls.data && <ToolsView pairs={toolCalls.data.tool_calls} />}
+            </div>
           )}
-          {events.data && <TimelineView events={events.data.events} />}
-        </div>
-      )}
 
-      {tab === "conversation" && (
-        <div className="flex-1 overflow-auto">
-          {events.isLoading && (
-            <div className="p-8 text-center text-sm text-muted-foreground">Loading transcript…</div>
+          {tab === "artifacts" && rootId && (
+            <div className="flex-1 overflow-auto">
+              <ArtifactsPanel sessionId={rootId} />
+            </div>
           )}
-          {events.data && <TranscriptList events={events.data.events} conversationOnly />}
-        </div>
-      )}
 
-      {tab === "tools" && (
-        <div className="flex-1 overflow-auto">
-          {toolCalls.isLoading && (
-            <div className="p-8 text-center text-sm text-muted-foreground">Loading tool calls…</div>
+          {tab === "learnings" && (
+            <div className="flex-1 overflow-auto">
+              <LearningsPanel learnings={learnings} onJumpToEvent={handleJumpToEvent} />
+            </div>
           )}
-          {toolCalls.data && <ToolsView pairs={toolCalls.data.tool_calls} />}
-        </div>
-      )}
 
-      {tab === "artifacts" && id && (
-        <div className="flex-1 overflow-auto">
-          <ArtifactsPanel sessionId={id} />
-        </div>
+          <ForkModal open={forkOpen} onClose={() => setForkOpen(false)} session={data} />
+        </>
       )}
-
-      {tab === "learnings" && (
-        <div className="flex-1 overflow-auto">
-          <LearningsPanel learnings={learnings} onJumpToEvent={handleJumpToEvent} />
-        </div>
-      )}
-
-      <ForkModal open={forkOpen} onClose={() => setForkOpen(false)} session={data} />
     </div>
   );
 };
