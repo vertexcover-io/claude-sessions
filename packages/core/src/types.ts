@@ -72,6 +72,7 @@ export interface ToolUseEvent extends CanonicalEventBase {
   input_summary: string;
   output_summary?: string;
   is_error?: boolean;
+  agent_id?: string; // set on an Agent/Task launch; == the child session id
 }
 
 /**

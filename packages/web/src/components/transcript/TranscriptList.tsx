@@ -13,6 +13,8 @@ interface Props {
    *  pure user/assistant conversation, AND collapse every contiguous run
    *  of assistant turns between two user turns into a single block. */
   conversationOnly?: boolean;
+  /** Drill into an `Agent` subagent's transcript from its tool_use row. */
+  onEnterSubagent?: (agentId: string, parentEventUuid: string) => void;
 }
 
 interface AssistantTurn {
@@ -75,7 +77,10 @@ const collapseAssistantRuns = (events: TranscriptEvent[]): TranscriptEvent[] => 
 // scroll height). The threshold matches Lighthouse's "interactive" budget.
 const VIRTUALIZE_THRESHOLD = 50;
 
-const renderEvent = (event: TranscriptEvent) => {
+const renderEvent = (
+  event: TranscriptEvent,
+  onEnterSubagent?: (agentId: string, parentEventUuid: string) => void,
+) => {
   switch (event.type) {
     case "user_msg":
       return <UserMessage content={event.payload.content_md ?? ""} ts={event.ts} />;
@@ -93,7 +98,7 @@ const renderEvent = (event: TranscriptEvent) => {
       );
     }
     case "tool_use":
-      return <ToolCallCollapsed event={event} />;
+      return <ToolCallCollapsed event={event} onEnterSubagent={onEnterSubagent} />;
     case "summary":
       return (
         <div className="msg-assistant border-dashed">
@@ -112,7 +117,7 @@ const renderEvent = (event: TranscriptEvent) => {
   }
 };
 
-const SimpleTranscript = ({ events }: Props) => (
+const SimpleTranscript = ({ events, onEnterSubagent }: Props) => (
   <div
     data-testid="transcript-list"
     className="transcript-list flex-1 overflow-auto px-4 py-4 space-y-3"
@@ -120,13 +125,13 @@ const SimpleTranscript = ({ events }: Props) => (
   >
     {events.map((event) => (
       <div key={event.event_uuid} id={`evt-${event.event_uuid}`}>
-        {renderEvent(event)}
+        {renderEvent(event, onEnterSubagent)}
       </div>
     ))}
   </div>
 );
 
-const VirtualizedTranscript = ({ events }: Props) => {
+const VirtualizedTranscript = ({ events, onEnterSubagent }: Props) => {
   const parentRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
     count: events.length,
@@ -167,7 +172,7 @@ const VirtualizedTranscript = ({ events }: Props) => {
                 paddingBottom: 12,
               }}
             >
-              {renderEvent(event)}
+              {renderEvent(event, onEnterSubagent)}
             </div>
           );
         })}
@@ -176,7 +181,7 @@ const VirtualizedTranscript = ({ events }: Props) => {
   );
 };
 
-export const TranscriptList = ({ events, conversationOnly }: Props) => {
+export const TranscriptList = ({ events, conversationOnly, onEnterSubagent }: Props) => {
   const filtered = conversationOnly
     ? collapseAssistantRuns(
         events.filter((e) => e.type === "user_msg" || e.type === "assistant_msg"),
@@ -189,6 +194,7 @@ export const TranscriptList = ({ events, conversationOnly }: Props) => {
       </div>
     );
   }
-  if (filtered.length < VIRTUALIZE_THRESHOLD) return <SimpleTranscript events={filtered} />;
-  return <VirtualizedTranscript events={filtered} />;
+  if (filtered.length < VIRTUALIZE_THRESHOLD)
+    return <SimpleTranscript events={filtered} onEnterSubagent={onEnterSubagent} />;
+  return <VirtualizedTranscript events={filtered} onEnterSubagent={onEnterSubagent} />;
 };

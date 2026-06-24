@@ -103,6 +103,9 @@ export interface TranscriptEvent {
      *  UI renders each as its own block with its own timestamp. */
     turns?: Array<{ ts: string; content_md: string }>;
     model?: string;
+    /** Present on an `Agent` tool_use event: the child session id whose
+     *  transcript captures the subagent's work. */
+    agent_id?: string;
   };
 }
 

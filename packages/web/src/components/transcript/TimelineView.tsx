@@ -1,4 +1,4 @@
-import { ChevronRight, Sparkles, User, Wrench } from "lucide-react";
+import { ChevronRight, CornerDownRight, Sparkles, User, Wrench } from "lucide-react";
 import { useState } from "react";
 import { cn } from "../../lib/cn";
 import type { TranscriptEvent } from "../../lib/types";
@@ -6,6 +6,7 @@ import { MarkdownView } from "./MarkdownView";
 
 interface Props {
   events: TranscriptEvent[];
+  onEnterSubagent?: (agentId: string, parentEventUuid: string) => void;
 }
 
 const formatTime = (iso: string): string => {
@@ -29,7 +30,13 @@ interface PairedTool {
   tool_use_id: string;
 }
 
-const PairedToolCard = ({ pair }: { pair: PairedTool }) => {
+const PairedToolCard = ({
+  pair,
+  onEnterSubagent,
+}: {
+  pair: PairedTool;
+  onEnterSubagent?: (agentId: string, parentEventUuid: string) => void;
+}) => {
   const [open, setOpen] = useState(false);
   const call = pair.call;
   const result = pair.result;
@@ -37,6 +44,8 @@ const PairedToolCard = ({ pair }: { pair: PairedTool }) => {
   const input = (call?.payload.input_summary ?? "") as string;
   const output = (result?.payload.output_summary ?? call?.payload.output_summary ?? "") as string;
   const isError = call?.payload.is_error === true || result?.payload.is_error === true;
+  const agentId = call?.payload.agent_id;
+  const callUuid = call?.event_uuid;
   const calledAt = call?.ts ?? null;
   const completedAt = result?.ts ?? null;
   const duration =
@@ -45,7 +54,7 @@ const PairedToolCard = ({ pair }: { pair: PairedTool }) => {
       : null;
 
   return (
-    <div className={cn("tool-card", isError && "tool-error")} data-testid="tool-card">
+    <div className={cn("tool-card relative", isError && "tool-error")} data-testid="tool-card">
       <button
         type="button"
         onClick={() => setOpen(!open)}
@@ -65,6 +74,16 @@ const PairedToolCard = ({ pair }: { pair: PairedTool }) => {
         )}
         {isError && <span className="role-badge role-badge-tool-error">error</span>}
       </button>
+      {agentId && callUuid && onEnterSubagent && (
+        <button
+          type="button"
+          onClick={() => onEnterSubagent(agentId, callUuid)}
+          className="absolute top-1.5 right-2 inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded border border-border bg-background hover:bg-accent"
+          data-testid="enter-subagent"
+        >
+          <CornerDownRight size={12} /> enter
+        </button>
+      )}
       {open && (
         <div className="tool-card-body space-y-2">
           {(calledAt || completedAt) && (
@@ -150,7 +169,7 @@ const buildTimeline = (events: TranscriptEvent[]) => {
   return { pairing, consumedResultIdx };
 };
 
-export const TimelineView = ({ events }: Props) => {
+export const TimelineView = ({ events, onEnterSubagent }: Props) => {
   if (events.length === 0) {
     return <div className="p-8 text-center text-sm text-muted-foreground">No timeline events.</div>;
   }
@@ -228,7 +247,7 @@ export const TimelineView = ({ events }: Props) => {
               id={`evt-${ev.event_uuid}`}
               dotClass={isError ? "timeline-dot-tool-error" : "timeline-dot-tool"}
             >
-              <PairedToolCard pair={pair} />
+              <PairedToolCard pair={pair} onEnterSubagent={onEnterSubagent} />
             </TimelineRow>
           );
         }

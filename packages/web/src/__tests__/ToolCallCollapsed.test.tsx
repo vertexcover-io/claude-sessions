@@ -1,7 +1,7 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ToolCallCollapsed } from "../components/transcript/ToolCallCollapsed";
 import type { TranscriptEvent } from "../lib/types";
 
@@ -33,5 +33,30 @@ describe("ToolCallCollapsed (REQ-024)", () => {
     expect(screen.getByTestId("tool-body")).toHaveTextContent("ls /tmp");
     fireEvent.click(toggle);
     expect(screen.queryByTestId("tool-body")).toBeNull();
+  });
+
+  it("renders an enter affordance for Agent rows and invokes onEnterSubagent with agent_id + event_uuid", () => {
+    const agentEvent: TranscriptEvent = {
+      event_uuid: "agent-row-1",
+      parent_uuid: null,
+      ts: "2026-05-01T10:00:00.000Z",
+      type: "tool_use",
+      payload: {
+        tool: "Agent",
+        tool_use_id: "tu-9",
+        input_summary: "spawn explorer",
+        agent_id: "child-session-1",
+      },
+    };
+    const onEnter = vi.fn();
+    render(<ToolCallCollapsed event={agentEvent} onEnterSubagent={onEnter} />);
+    const enter = screen.getByTestId("enter-subagent");
+    fireEvent.click(enter);
+    expect(onEnter).toHaveBeenCalledWith("child-session-1", "agent-row-1");
+  });
+
+  it("renders no enter affordance when agent_id is absent", () => {
+    render(<ToolCallCollapsed event={event} onEnterSubagent={vi.fn()} />);
+    expect(screen.queryByTestId("enter-subagent")).toBeNull();
   });
 });

@@ -92,6 +92,7 @@ export const sessions = pgTable(
     permissionMode: text("permission_mode"),
     isPrivate: boolean("is_private").notNull().default(false),
     name: text("name"),
+    parentSessionId: text("parent_session_id"),
     hasBlob: boolean("has_blob").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
@@ -100,6 +101,7 @@ export const sessions = pgTable(
     userRepoIdx: index("idx_sessions_user_repo").on(t.userId, t.repoId),
     repoBranchIdx: index("idx_sessions_repo_branch").on(t.repoId, t.branch),
     startedAtIdx: index("idx_sessions_started_at").on(t.startedAt),
+    parentIdx: index("idx_sessions_parent").on(t.parentSessionId),
   }),
 );
 

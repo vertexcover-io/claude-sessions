@@ -1,6 +1,7 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { dirname } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { type FSWatcher, watch as chokidarWatch } from "chokidar";
 import { listRepos } from "../config/repos.js";
 import { findSessionsForRepo } from "../discover.js";
@@ -30,12 +31,46 @@ export interface JsonlWatcherOptions {
   logger?: (msg: string) => void;
 }
 
+/**
+ * Subagent transcripts for a main session `<project>/<MAIN>.jsonl` live in
+ * `<project>/<MAIN>/subagents/**\/agent-*.jsonl`. Glob them so the catch-up
+ * pass backfills child sessions. The dir may not exist (no subagents ran).
+ */
+const subagentFilesFor = (mainFile: string): string[] => {
+  const dir = mainFile.replace(/\.jsonl$/, "");
+  const root = join(dir, "subagents");
+  if (!existsSync(root)) return [];
+  const out: string[] = [];
+  const walk = (d: string): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(d);
+    } catch {
+      return;
+    }
+    for (const name of entries) {
+      const full = join(d, name);
+      let st: ReturnType<typeof statSync>;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) walk(full);
+      else if (st.isFile() && name.startsWith("agent-") && name.endsWith(".jsonl")) out.push(full);
+    }
+  };
+  walk(root);
+  return out;
+};
+
 const defaultDiscover = (): string[] => {
   const out = new Set<string>();
   for (const r of listRepos()) {
     if (!r.entry.enabled) continue;
     for (const f of findSessionsForRepo(r.canonical_url, [r.entry.local_path])) {
       out.add(f.path);
+      for (const sub of subagentFilesFor(f.path)) out.add(sub);
     }
   }
   return Array.from(out);
@@ -54,8 +89,16 @@ export class JsonlWatcher {
     const files = (this.opts.discover ?? defaultDiscover)();
     // Catch-up pass first — backfill pre-existing JSONLs (REQ-013).
     for (const f of files) await this.consumeSafe(f);
-    // Then install live watcher on parent directories.
-    const dirs = Array.from(new Set(files.map((f) => dirname(f))));
+    // Then install live watcher on parent directories. For each discovered
+    // main JSONL, also watch its `subagents/` dir so newly-spawned subagent
+    // transcripts fire `add`/`change` (consumeFile self-detects the path).
+    const dirSet = new Set(files.map((f) => dirname(f)));
+    for (const f of files) {
+      if (basename(dirname(f)) === "subagents") continue;
+      const subDir = join(f.replace(/\.jsonl$/, ""), "subagents");
+      if (existsSync(subDir)) dirSet.add(subDir);
+    }
+    const dirs = Array.from(dirSet);
     if (dirs.length === 0) return;
     const factory = this.opts.chokidarFactory ?? chokidarWatch;
     this.watcher = factory(dirs, {

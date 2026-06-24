@@ -50,6 +50,7 @@ const canonicalPayload = (ev: CanonicalEvent): Record<string, unknown> => {
         input_summary: ev.input_summary,
         ...(ev.output_summary !== undefined ? { output_summary: ev.output_summary } : {}),
         ...(ev.is_error !== undefined ? { is_error: ev.is_error } : {}),
+        ...(ev.agent_id !== undefined ? { agent_id: ev.agent_id } : {}),
       };
     case "summary":
       return { content: ev.content };
@@ -94,11 +95,26 @@ const isRealTs = (s: string | undefined): s is string => {
   return Number.isFinite(ms) && ms > 0;
 };
 
+/**
+ * Subagent transcripts live at
+ * `…/<MAIN_SESSION_ID>/subagents/agent-<AGENT_ID>.jsonl`. Their internal
+ * `sessionId` field collides with the parent's, so we key the child session
+ * off the `<AGENT_ID>` in the path and stamp the parent link from `<MAIN>`.
+ */
+const SUBAGENT_RE = /\/([0-9a-f-]{36})\/subagents\/agent-([a-f0-9]+)\.jsonl$/;
+
+const detectSubagent = (path: string): { mainSessionId: string; agentId: string } | null => {
+  const m = path.match(SUBAGENT_RE);
+  if (!m?.[1] || !m[2]) return null;
+  return { mainSessionId: m[1], agentId: m[2] };
+};
+
 const buildSessionPayload = (
   sessionId: string,
   cwd: string,
   events: CanonicalEvent[],
   canonicalUrl: string,
+  parentSessionId?: string,
 ): IngestPayload => {
   const fallback = new Date().toISOString();
   const ts0 = events.find((e) => isRealTs(e.ts))?.ts ?? fallback;
@@ -134,6 +150,7 @@ const buildSessionPayload = (
       agent: "claude-code",
       agent_version: "1.0.0",
       repo: { canonical_url: canonicalUrl, branch },
+      ...(parentSessionId !== undefined ? { parent_session_id: parentSessionId } : {}),
       source_cwd_hint: cwd,
       started_at: ts0,
       ended_at: tsN,
@@ -238,8 +255,17 @@ export const consumeFile = async (
     return { uploaded: 0, skipped: true, reason: "no-events" };
   }
 
-  const sessionId = meta.session_id ?? collected[0]?.event_uuid ?? path;
-  const fullPayload = buildSessionPayload(sessionId, meta.cwd, collected, repo.canonical_url);
+  // Subagent transcripts collide on `sessionId` with their parent; key the
+  // child off the path's `<AGENT_ID>` and stamp the parent link.
+  const subagent = detectSubagent(path);
+  const sessionId = subagent?.agentId ?? meta.session_id ?? collected[0]?.event_uuid ?? path;
+  const fullPayload = buildSessionPayload(
+    sessionId,
+    meta.cwd,
+    collected,
+    repo.canonical_url,
+    subagent?.mainSessionId,
+  );
 
   // Mine commits authored in the session window from the local repo. Best
   // effort — if `git` is missing or the path isn't a repo, list returns

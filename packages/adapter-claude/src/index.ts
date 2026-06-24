@@ -194,6 +194,27 @@ function isUserToolResult(c: unknown): c is UserContentToolResult {
   return !!c && typeof c === "object" && (c as { type?: unknown }).type === "tool_result";
 }
 
+/** The child-session link key. An `Agent`/`Task` launch echoes the spawned
+ *  subagent's id as free text in its tool_result (`agentId: <hex>`); the
+ *  subagent transcript is captured as a child session keyed by that id. */
+const AGENT_ID_RE = /agentId:\s*([a-f0-9]+)/;
+const extractAgentId = (content: unknown): string | undefined => {
+  const text =
+    typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((c) =>
+              c && typeof c === "object" && typeof (c as { text?: unknown }).text === "string"
+                ? (c as { text: string }).text
+                : "",
+            )
+            .join("\n")
+        : "";
+  const m = text.match(AGENT_ID_RE);
+  return m?.[1];
+};
+
 /** Stable per-line identifier when the source record has no `uuid`.
  *  Some Claude Code records (`file-history-snapshot`, `queue-operation`,
  *  forward-compat unknown types) lack `uuid`. Without a stable id, every
@@ -258,6 +279,7 @@ function parseUser(raw: RawLine): CanonicalEvent[] {
     for (const c of content) {
       if (isUserToolResult(c)) {
         const base = baseFields(raw);
+        const agentId = extractAgentId(c.content);
         const tool: ToolUseEvent = {
           type: "tool_use",
           ts: base.ts,
@@ -271,6 +293,7 @@ function parseUser(raw: RawLine): CanonicalEvent[] {
           input_summary: "",
           output_summary: summarizeToolOutput(c.content),
           is_error: c.is_error === true,
+          ...(agentId !== undefined ? { agent_id: agentId } : {}),
         };
         events.push(tool);
         continue;
@@ -558,6 +581,7 @@ export function readSessionSync(path: string, opts: ReadSessionSyncOptions = {})
         if (call && call.type === "tool_use") {
           call.output_summary = ev.output_summary;
           if (ev.is_error) call.is_error = true;
+          if (ev.agent_id !== undefined) call.agent_id = ev.agent_id;
         }
       }
     }

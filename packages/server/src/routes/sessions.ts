@@ -1,6 +1,6 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { type AuthVariables, buildRequireAuth } from "../auth/middleware.js";
@@ -115,7 +115,7 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
     if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
     const params = parsed.data;
 
-    const filters = [eq(sessions.userId, user.id)];
+    const filters = [eq(sessions.userId, user.id), isNull(sessions.parentSessionId)];
     if (params.agent) filters.push(eq(sessions.agent, params.agent));
     if (params.branch) filters.push(eq(sessions.branch, params.branch));
     if (params.repo) {
@@ -341,6 +341,51 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
         files_changed: r.filesChanged,
         insertions: r.insertions,
         deletions: r.deletions,
+      })),
+    });
+  });
+
+  /**
+   * GET /api/sessions/:id/children — subagent (child) sessions launched from
+   * this session, hidden from the top-level list. Owner-only RBAC. Mirrors the
+   * sibling `:id/events` ownership check. Left-joins the summary for a title.
+   */
+  router.get("/:id/children", async (c) => {
+    const user = c.get("user");
+    const sessionId = c.req.param("id");
+
+    const sessRows = await db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .limit(1);
+    if (!sessRows[0]) return c.json({ error: "session not found" }, 404);
+
+    const rows = await db
+      .select({
+        id: sessions.id,
+        name: sessions.name,
+        startedAt: sessions.startedAt,
+        model: sessions.model,
+        totalInputTokens: sessions.totalInputTokens,
+        totalOutputTokens: sessions.totalOutputTokens,
+        title: summaries.title,
+      })
+      .from(sessions)
+      .leftJoin(summaries, eq(summaries.sessionId, sessions.id))
+      .where(and(eq(sessions.parentSessionId, sessionId), eq(sessions.userId, user.id)))
+      .orderBy(asc(sessions.startedAt));
+
+    return c.json({
+      children: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        started_at: r.startedAt.toISOString(),
+        model: r.model,
+        total_input_tokens: r.totalInputTokens,
+        total_output_tokens: r.totalOutputTokens,
+        title: r.title ?? null,
+        display_name: r.name ?? r.title ?? `Session ${r.id.slice(0, 8)}`,
       })),
     });
   });

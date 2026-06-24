@@ -157,6 +157,13 @@ export const useSessionEvents = (id: string | undefined) =>
     queryFn: () => apiFetch<{ events: TranscriptEvent[] }>(`/api/sessions/${id}/events`),
   });
 
+export const useSessionChildren = (id: string | undefined) =>
+  useQuery({
+    queryKey: ["session-children", id],
+    enabled: !!id,
+    queryFn: () => apiFetch<{ children: SessionListItem[] }>(`/api/sessions/${id}/children`),
+  });
+
 export const useSessionToolCalls = (id: string | undefined) =>
   useQuery({
     queryKey: ["session-tool-calls", id],

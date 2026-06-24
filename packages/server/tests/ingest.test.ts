@@ -25,6 +25,7 @@ interface IngestBody {
     agent: "claude-code";
     agent_version: string;
     repo: { canonical_url: string; branch: string | null };
+    parent_session_id?: string;
     source_cwd_hint: string;
     started_at: string;
     ended_at: string;
@@ -91,6 +92,9 @@ const post = async (path: string, token: string, body: unknown): Promise<Respons
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify(body),
   });
+
+const get = async (path: string, token: string): Promise<Response> =>
+  app.request(path, { method: "GET", headers: { authorization: `Bearer ${token}` } });
 
 describe("POST /api/ingest", () => {
   it("REQ-033: idempotent — same batch posted twice yields one row per event", async () => {
@@ -217,6 +221,83 @@ describe("POST /api/ingest", () => {
     const stored = JSON.stringify(rows[0]?.payload ?? {});
     expect(stored).not.toContain("AKIA0123456789ABCDEF");
     expect(stored).toContain("[REDACTED:");
+  });
+});
+
+describe("subagent (child) sessions", () => {
+  it("ingests a child with parent_session_id; lists exclude it; /children + /events reach it", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "subagent@example.test",
+      repoUrl: "github.com/example/subagent",
+    });
+    const parentId = "session-parent-1";
+    const childId = "agent-child-1";
+
+    const parentPayload = buildIngestPayload(parentId, seed.repoCanonical, [
+      {
+        event_uuid: "ev-parent-1",
+        parent_uuid: null,
+        ts: "2026-05-01T10:00:01.000Z",
+        type: "tool_use",
+        payload: { tool: "Agent", agent_id: childId },
+      },
+    ]);
+    const childPayload = buildIngestPayload(childId, seed.repoCanonical, [
+      {
+        event_uuid: "ev-child-1",
+        parent_uuid: null,
+        ts: "2026-05-01T10:00:05.000Z",
+        type: "user_msg",
+        payload: { text: "subagent prompt" },
+      },
+    ]);
+    childPayload.session.parent_session_id = parentId;
+
+    expect((await post("/api/ingest", seed.token, parentPayload)).status).toBe(200);
+    expect((await post("/api/ingest", seed.token, childPayload)).status).toBe(200);
+
+    // The link persists on the child row.
+    const linkRows = await db.sql<{ parent_session_id: string | null }[]>`
+      SELECT parent_session_id FROM sessions WHERE id = ${childId}`;
+    expect(linkRows[0]?.parent_session_id).toBe(parentId);
+
+    // The top-level list excludes the child but includes the parent.
+    const listRes = await get("/api/sessions", seed.token);
+    expect(listRes.status).toBe(200);
+    const list = (await listRes.json()) as { sessions: { id: string }[] };
+    const ids = list.sessions.map((s) => s.id);
+    expect(ids).toContain(parentId);
+    expect(ids).not.toContain(childId);
+
+    // /children lists the child under its parent.
+    const childrenRes = await get(`/api/sessions/${parentId}/children`, seed.token);
+    expect(childrenRes.status).toBe(200);
+    const children = (await childrenRes.json()) as { children: { id: string }[] };
+    expect(children.children.map((c) => c.id)).toEqual([childId]);
+
+    // A child is just another session: its events are reachable directly.
+    const eventsRes = await get(`/api/sessions/${childId}/events`, seed.token);
+    expect(eventsRes.status).toBe(200);
+    const childEvents = (await eventsRes.json()) as { events: { event_uuid: string }[] };
+    expect(childEvents.events.map((e) => e.event_uuid)).toEqual(["ev-child-1"]);
+  });
+
+  it("ingests a child before its parent exists (no FK ordering hard-fail)", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "subagent-order@example.test",
+      repoUrl: "github.com/example/subagent-order",
+    });
+    const parentId = "session-parent-2";
+    const childId = "agent-child-2";
+
+    const childPayload = buildIngestPayload(childId, seed.repoCanonical, []);
+    childPayload.session.parent_session_id = parentId;
+
+    // Child first — the parent row does not exist yet.
+    expect((await post("/api/ingest", seed.token, childPayload)).status).toBe(200);
+    const rows = await db.sql<{ parent_session_id: string | null }[]>`
+      SELECT parent_session_id FROM sessions WHERE id = ${childId}`;
+    expect(rows[0]?.parent_session_id).toBe(parentId);
   });
 });
 
