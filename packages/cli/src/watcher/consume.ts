@@ -109,6 +109,30 @@ const detectSubagent = (path: string): { mainSessionId: string; agentId: string 
   return { mainSessionId: m[1], agentId: m[2] };
 };
 
+/**
+ * The adapter stamps `agent_id` on the tool_result event (that's where the
+ * "agentId: …" launch text lives), but the web reads it off the Agent *call*
+ * event. The streaming upload path here does NOT run readSessionSync's
+ * call↔result pairing, so propagate agent_id from each result onto its call
+ * (matched by `tool_use_id`) before upload. Without this the call event ships
+ * without agent_id and the web never shows the drill-in affordance.
+ */
+const linkAgentIds = (events: CanonicalEvent[]): void => {
+  const agentIdByToolUse = new Map<string, string>();
+  for (const ev of events) {
+    if (ev.type === "tool_use" && ev.agent_id && ev.tool_use_id) {
+      agentIdByToolUse.set(ev.tool_use_id, ev.agent_id);
+    }
+  }
+  if (agentIdByToolUse.size === 0) return;
+  for (const ev of events) {
+    if (ev.type === "tool_use" && ev.tool && !ev.agent_id) {
+      const aid = agentIdByToolUse.get(ev.tool_use_id);
+      if (aid) ev.agent_id = aid;
+    }
+  }
+};
+
 const buildSessionPayload = (
   sessionId: string,
   cwd: string,
@@ -254,6 +278,10 @@ export const consumeFile = async (
     });
     return { uploaded: 0, skipped: true, reason: "no-events" };
   }
+
+  // Propagate agent_id from Agent tool_result events onto their call events
+  // so the uploaded call (tool="Agent") carries the link the web reads.
+  linkAgentIds(collected);
 
   // Subagent transcripts collide on `sessionId` with their parent; key the
   // child off the path's `<AGENT_ID>` and stamp the parent link.

@@ -1,5 +1,7 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { FSWatcher, watch as chokidarWatch } from "chokidar";
 
 type ChokidarFactory = typeof chokidarWatch;
@@ -20,6 +22,8 @@ interface FakeWatcher {
   watcher: FSWatcher;
   emitChange: (path: string) => void;
   emitAdd: (path: string) => void;
+  emitError: (err: unknown) => void;
+  added: string[];
   closed: boolean;
 }
 
@@ -27,17 +31,25 @@ const makeFakeChokidar = (): FakeWatcher => {
   const handlers: Record<string, ((...args: unknown[]) => void)[]> = {};
   const fake: FakeWatcher = {
     closed: false,
+    added: [],
     emitChange: (p: string) => {
       for (const h of handlers.change ?? []) h(p);
     },
     emitAdd: (p: string) => {
       for (const h of handlers.add ?? []) h(p);
     },
+    emitError: (err: unknown) => {
+      for (const h of handlers.error ?? []) h(err);
+    },
     watcher: {
       on(event: string, cb: (...args: unknown[]) => void) {
         const list = handlers[event] ?? [];
         list.push(cb);
         handlers[event] = list;
+        return this;
+      },
+      add(path: string) {
+        fake.added.push(path);
         return this;
       },
       close() {
@@ -152,6 +164,62 @@ describe("watcher tail: catch-up + live add (REQ-001, REQ-002)", () => {
       await watcher.drain();
 
       expect(ingestedSessionIds()).toContain(sidLive);
+
+      await watcher.stop();
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it("bounds live subagent-dir watches to recent sessions and survives watcher errors", async () => {
+    const repo = makeTempGitRepo("git@github.com:fixture/subagent-watch.git");
+    try {
+      await enableCommand({
+        path: repo.path,
+        client: buildClient(),
+        skipBackfill: true,
+        refreshDaemon: () => undefined,
+      });
+
+      const mkSessionWithSubagents = (sid: string): string => {
+        const f = createSessionFile(fixture.projectsRoot, repo.path, sid, [
+          buildEvent({ uuid: `${sid}-1`, sessionId: sid, cwd: repo.path }),
+        ]);
+        const subDir = join(dirname(f.path), sid, "subagents");
+        mkdirSync(subDir, { recursive: true });
+        writeFileSync(join(subDir, "agent-aaaa1111bbbb2222.jsonl"), "");
+        return f.path;
+      };
+
+      const recent = mkSessionWithSubagents("recent-session");
+      const old = mkSessionWithSubagents("old-session");
+      // Age the old session's main file well past the live-watch window so its
+      // subagents dir is NOT watched (would otherwise exhaust inotify at scale).
+      const past = Date.now() - 1000 * 60 * 60 * 72;
+      utimesSync(old, new Date(past), new Date(past));
+
+      let watchedDirs: string[] = [];
+      const fake = makeFakeChokidar();
+      const watcher = new JsonlWatcher({
+        client: buildClient(),
+        discover: () => [recent, old],
+        logger: () => undefined,
+        chokidarFactory: ((paths: string[] | string) => {
+          watchedDirs = Array.isArray(paths) ? paths : [paths];
+          return fake.watcher;
+        }) as unknown as ChokidarFactory,
+      });
+
+      await watcher.start();
+      await watcher.drain();
+
+      const recentSub = join(dirname(recent), "recent-session", "subagents");
+      const oldSub = join(dirname(old), "old-session", "subagents");
+      expect(watchedDirs).toContain(recentSub);
+      expect(watchedDirs).not.toContain(oldSub);
+
+      // An ENOSPC-style watcher error must not crash the process.
+      expect(() => fake.emitError(new Error("ENOSPC: watch limit reached"))).not.toThrow();
 
       await watcher.stop();
     } finally {

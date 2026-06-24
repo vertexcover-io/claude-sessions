@@ -44,7 +44,9 @@ const PairedToolCard = ({
   const input = (call?.payload.input_summary ?? "") as string;
   const output = (result?.payload.output_summary ?? call?.payload.output_summary ?? "") as string;
   const isError = call?.payload.is_error === true || result?.payload.is_error === true;
-  const agentId = call?.payload.agent_id;
+  // agent_id may ride on the call (preferred) or the paired result event,
+  // depending on capture path / upload batching — accept either.
+  const agentId = call?.payload.agent_id ?? result?.payload.agent_id;
   const callUuid = call?.event_uuid;
   const calledAt = call?.ts ?? null;
   const completedAt = result?.ts ?? null;
