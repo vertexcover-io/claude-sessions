@@ -1,6 +1,6 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { eq } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import type { GithubProfile } from "../auth/github.js";
 import type { DbClient } from "./client.js";
 import { users } from "./schema.js";
@@ -18,12 +18,22 @@ export interface AppUser {
  *
  * 1. Match by `github_id` → refresh login/avatar/email (login + avatar can
  *    change on GitHub).
- * 2. Else match by `email` → **adopt** the existing (e.g. legacy password)
- *    row by stamping the github fields onto it, preserving its `id` and every
- *    FK'd session.
+ * 2. Else **adopt** an unlinked legacy row whose email the caller has proven
+ *    they own, stamping the github fields onto it (preserving its `id` and
+ *    every FK'd session).
  * 3. Else insert a fresh row.
+ *
+ * SECURITY: adoption is the account-takeover surface. It matches **only**
+ * against the user's GitHub-**verified** emails (`verifiedEmails`, never the
+ * unverified `/user.email` field) and **only** rows with `github_id IS NULL`,
+ * so it can neither claim an address the user hasn't proven they own nor
+ * re-link (hijack) an already-linked account.
  */
-export const upsertGithubUser = async (db: DbClient, profile: GithubProfile): Promise<AppUser> => {
+export const upsertGithubUser = async (
+  db: DbClient,
+  profile: GithubProfile,
+  verifiedEmails: string[],
+): Promise<AppUser> => {
   const toAppUser = (row: typeof users.$inferSelect): AppUser => ({
     id: row.id,
     email: row.email,
@@ -42,8 +52,13 @@ export const upsertGithubUser = async (db: DbClient, profile: GithubProfile): Pr
     return toAppUser(updated[0] ?? byGithubId[0]);
   }
 
-  if (profile.email) {
-    const byEmail = await db.select().from(users).where(eq(users.email, profile.email)).limit(1);
+  const lowered = verifiedEmails.map((e) => e.toLowerCase()).filter((e) => e.length > 0);
+  if (lowered.length > 0) {
+    const byEmail = await db
+      .select()
+      .from(users)
+      .where(and(inArray(sql`lower(${users.email})`, lowered), isNull(users.githubId)))
+      .limit(1);
     if (byEmail[0]) {
       const adopted = await db
         .update(users)
