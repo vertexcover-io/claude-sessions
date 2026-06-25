@@ -18,6 +18,9 @@ export interface GithubClient {
   exchangeCode(code: string, redirectUri: string): Promise<{ accessToken: string }>;
   getProfile(accessToken: string): Promise<GithubProfile>;
   getPrimaryEmail(accessToken: string): Promise<string | null>;
+  /** Every VERIFIED email on the account. Used as the account-adoption key so a
+   *  user can only adopt a legacy row whose email they have proven they own. */
+  getVerifiedEmails(accessToken: string): Promise<string[]>;
   isOrgMember(accessToken: string, org: string): Promise<boolean>;
 }
 
@@ -105,6 +108,15 @@ export const createGithubClient = (env: Env): GithubClient => {
       const data = (await res.json()) as EmailResponse[];
       const primary = data.find((e) => e.primary && e.verified) ?? data.find((e) => e.verified);
       return primary?.email ?? null;
+    },
+
+    getVerifiedEmails: async (accessToken) => {
+      const res = await fetch("https://api.github.com/user/emails", {
+        headers: apiHeaders(accessToken),
+      });
+      if (!res.ok) return [];
+      const data = (await res.json()) as EmailResponse[];
+      return data.filter((e) => e.verified).map((e) => e.email);
     },
 
     isOrgMember: async (accessToken, org) => {

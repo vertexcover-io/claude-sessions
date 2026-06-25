@@ -23,8 +23,14 @@ const emailForToken = (email: string | null, login: string): string =>
   email ?? `${login}@users.noreply.github.com`;
 
 // Only allow same-origin relative paths as the post-login redirect target.
-const safeReturnPath = (raw: string | undefined): string =>
-  raw?.startsWith("/") && !raw.startsWith("//") ? raw : "/";
+// Must start with "/" but not be protocol-relative: browsers normalize both
+// "//host" and "/\host" (backslash) into an external origin, so reject when the
+// second char is "/" or "\".
+const safeReturnPath = (raw: string | undefined): string => {
+  if (!raw || !raw.startsWith("/")) return "/";
+  if (raw[1] === "/" || raw[1] === "\\") return "/";
+  return raw;
+};
 
 interface PairEntry {
   userId: string;
@@ -116,8 +122,10 @@ export const buildAuthRouter = (
       if (!profile.email) {
         profile.email = await githubClient.getPrimaryEmail(accessToken);
       }
+      // Adoption keys on verified emails only (see upsertGithubUser SECURITY).
+      const verifiedEmails = await githubClient.getVerifiedEmails(accessToken);
 
-      const user = await upsertGithubUser(db, profile);
+      const user = await upsertGithubUser(db, profile, verifiedEmails);
       const role = user.role === "admin" ? "admin" : "user";
       const cookieToken = await signToken(
         { sub: user.id, email: emailForToken(user.email, profile.login), role, aud: "web" },

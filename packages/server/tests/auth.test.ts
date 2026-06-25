@@ -18,20 +18,31 @@ const OCTOCAT: GithubProfile = {
   email: "octo@example.test",
 };
 
-const stubGithub = (opts: { member: boolean; profile?: GithubProfile }): GithubClient => {
+const stubGithub = (opts: {
+  member: boolean;
+  profile?: GithubProfile;
+  verifiedEmails?: string[];
+}): GithubClient => {
   const profile = opts.profile ?? OCTOCAT;
+  // Default: the profile email is verified. Pass verifiedEmails: [] to simulate
+  // an unverified address.
+  const verified = opts.verifiedEmails ?? (profile.email ? [profile.email] : []);
   return {
     exchangeCode: async () => ({ accessToken: "stub-token" }),
     getProfile: async () => profile,
     getPrimaryEmail: async () => profile.email,
+    getVerifiedEmails: async () => verified,
     isOrgMember: async () => opts.member,
   };
 };
 
 // Drive /github/start, returning the raw oauth_state cookie value so the
 // callback test can replay it as both the query param and the cookie.
-const startOauth = async (testApp: Hono): Promise<string> => {
-  const res = await testApp.request("/api/auth/github/start");
+const startOauth = async (testApp: Hono, from?: string): Promise<string> => {
+  const path = from
+    ? `/api/auth/github/start?from=${encodeURIComponent(from)}`
+    : "/api/auth/github/start";
+  const res = await testApp.request(path);
   expect(res.status).toBe(302);
   expect(res.headers.get("location") ?? "").toContain("github.com/login/oauth/authorize");
   const setCookie = res.headers.get("set-cookie") ?? "";
@@ -178,6 +189,84 @@ describe("GitHub OAuth login", () => {
     expect(rows[0]?.id).toBe(existingId);
     expect(rows[0]?.githubId).toBe(OCTOCAT.id);
     expect(rows[0]?.githubLogin).toBe("octocat");
+  });
+
+  it("does NOT adopt a legacy row by an email the user has not GitHub-verified", async () => {
+    const existing = await db.db
+      .insert(users)
+      .values({ email: OCTOCAT.email, role: "user" })
+      .returning({ id: users.id });
+    const existingId = existing[0]?.id;
+
+    // getProfile reports the legacy email, but it is NOT among the verified
+    // emails — adoption must refuse it. The login then fails safely on the
+    // unique email rather than silently taking over the legacy row.
+    const a = buildApp(db.db, oauthEnv(), {
+      githubClient: stubGithub({ member: true, verifiedEmails: [] }),
+    });
+    const state = await startOauth(a);
+    const res = await a.request(`/api/auth/github/callback?code=abc&state=${state}`, {
+      headers: { cookie: `oauth_state=${state}` },
+    });
+
+    // Legacy row is NOT adopted (github identity stays empty) — no takeover.
+    const legacy = await db.db
+      .select()
+      .from(users)
+      .where(eq(users.id, existingId ?? ""));
+    expect(legacy[0]?.githubId).toBeNull();
+    expect(legacy[0]?.githubLogin).toBeNull();
+    expect(res.headers.get("location")).toBe("/login?error=oauth");
+  });
+
+  it("does NOT re-link (hijack) a row that already has a github_id", async () => {
+    // A victim already linked to github_id 111, sharing an email with the caller.
+    const victim = await db.db
+      .insert(users)
+      .values({ email: "shared@example.test", githubId: 111, githubLogin: "victim", role: "user" })
+      .returning({ id: users.id });
+    const victimId = victim[0]?.id;
+
+    // A different github id presents the same verified email.
+    const other: GithubProfile = {
+      id: 222,
+      login: "other",
+      avatarUrl: "https://avatars.test/other",
+      email: "shared@example.test",
+    };
+    const a = buildApp(db.db, oauthEnv(), {
+      githubClient: stubGithub({ member: true, profile: other }),
+    });
+    const state = await startOauth(a);
+    await a.request(`/api/auth/github/callback?code=abc&state=${state}`, {
+      headers: { cookie: `oauth_state=${state}` },
+    });
+
+    // Victim row keeps its github_id/login — the email match did NOT re-link it.
+    const victimRow = await db.db
+      .select()
+      .from(users)
+      .where(eq(users.id, victimId ?? ""));
+    expect(victimRow[0]?.githubId).toBe(111);
+    expect(victimRow[0]?.githubLogin).toBe("victim");
+  });
+
+  it("sanitizes the post-login redirect (open-redirect guard)", async () => {
+    const a = buildApp(db.db, oauthEnv(), { githubClient: stubGithub({ member: true }) });
+    for (const evil of ["//evil.com", "/\\evil.com", "https://evil.com"]) {
+      const state = await startOauth(a, evil);
+      const res = await a.request(`/api/auth/github/callback?code=abc&state=${state}`, {
+        headers: { cookie: `oauth_state=${state}` },
+      });
+      expect(res.status).toBe(302);
+      expect(res.headers.get("location")).toBe("/");
+    }
+    // A genuine same-origin path is preserved.
+    const okState = await startOauth(a, "/repos/github.com/acme/widget");
+    const okRes = await a.request(`/api/auth/github/callback?code=abc&state=${okState}`, {
+      headers: { cookie: `oauth_state=${okState}` },
+    });
+    expect(okRes.headers.get("location")).toBe("/repos/github.com/acme/widget");
   });
 });
 
