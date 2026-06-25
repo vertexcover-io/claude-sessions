@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   ArtifactContent,
   ArtifactMeta,
+  RepoFacets,
   RepoSummary,
   SearchFacets,
   SearchResult,
@@ -53,29 +54,6 @@ export const apiFetch = async <T>(path: string, init: RequestInit = {}): Promise
 
 // ----- Auth ---------------------------------------------------------------
 
-export interface LoginInput {
-  email: string;
-  password: string;
-}
-export interface LoginResponse {
-  token: string;
-  user: User;
-}
-
-export const useLogin = () => {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: LoginInput) =>
-      apiFetch<LoginResponse>("/api/auth/login", {
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["me"] });
-    },
-  });
-};
-
 export const useLogout = () => {
   const qc = useQueryClient();
   return useMutation({
@@ -112,14 +90,33 @@ export const useEnabledRepos = () =>
     queryFn: () => apiFetch<{ repos: RepoSummary[] }>("/api/repos"),
   });
 
-export const useRepoSessions = (canonicalUrl: string | undefined) =>
+export const useRepoSessions = (
+  canonicalUrl: string | undefined,
+  filters: { users?: string[]; branches?: string[] } = {},
+) => {
+  const users = filters.users ?? [];
+  const branches = filters.branches ?? [];
+  return useQuery({
+    queryKey: ["repo-sessions", canonicalUrl, [...users].sort(), [...branches].sort()],
+    enabled: !!canonicalUrl,
+    queryFn: () => {
+      const qs = new URLSearchParams();
+      for (const u of users) qs.append("user", u);
+      for (const b of branches) qs.append("branch", b);
+      const suffix = qs.toString() ? `?${qs.toString()}` : "";
+      return apiFetch<{ repo: { canonical_url: string } | null; sessions: SessionListItem[] }>(
+        `/api/repos/${encodeURIComponent(canonicalUrl ?? "")}/sessions${suffix}`,
+      );
+    },
+  });
+};
+
+export const useRepoFacets = (canonicalUrl: string | undefined) =>
   useQuery({
-    queryKey: ["repo-sessions", canonicalUrl],
+    queryKey: ["repo-facets", canonicalUrl],
     enabled: !!canonicalUrl,
     queryFn: () =>
-      apiFetch<{ repo: { canonical_url: string } | null; sessions: SessionListItem[] }>(
-        `/api/repos/${encodeURIComponent(canonicalUrl ?? "")}/sessions`,
-      ),
+      apiFetch<RepoFacets>(`/api/repos/${encodeURIComponent(canonicalUrl ?? "")}/facets`),
   });
 
 // ----- Sessions -----------------------------------------------------------
@@ -128,14 +125,17 @@ export const useRecentSessions = (
   params: {
     limit?: number;
     agent?: string;
-    repo?: string;
     branch?: string;
+    repos?: string[];
+    users?: string[];
   } = {},
 ) => {
   const qs = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
-  }
+  if (params.limit) qs.set("limit", String(params.limit));
+  if (params.agent) qs.set("agent", params.agent);
+  if (params.branch) qs.set("branch", params.branch);
+  for (const r of params.repos ?? []) qs.append("repo", r);
+  for (const u of params.users ?? []) qs.append("user", u);
   const url = `/api/sessions${qs.toString() ? `?${qs.toString()}` : ""}`;
   return useQuery({
     queryKey: ["recent-sessions", qs.toString()],
@@ -204,6 +204,7 @@ export interface SearchFilters {
   since?: string;
   limit?: number;
   tag?: string;
+  user?: string;
 }
 
 export const useSearchFacets = () =>
@@ -234,6 +235,7 @@ export const useSearch = (filters: SearchFilters | null) =>
       if (filters.agent) qs.set("agent", filters.agent);
       if (filters.model) qs.set("model", filters.model);
       if (filters.tag) qs.set("tag", filters.tag);
+      if (filters.user) qs.set("user", filters.user);
       if (filters.has_pr !== undefined) qs.set("has_pr", String(filters.has_pr));
       if (filters.since) qs.set("since", filters.since);
       if (filters.limit) qs.set("limit", String(filters.limit));

@@ -1,8 +1,8 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { DbClient } from "../db/client.js";
-import { auditLog, repos, sessions, summaries, userRepos } from "../db/schema.js";
+import { auditLog, repos, sessions, summaries } from "../db/schema.js";
 
 export interface SessionDetail {
   session_id: string;
@@ -25,34 +25,15 @@ export interface SessionDetail {
   name: string | null;
 }
 
-const buildAccessibleRepoIds = async (db: DbClient, userId: string): Promise<string[]> => {
+// Global reads: any authenticated org member can read any non-private session.
+const isReadable = async (db: DbClient, sessionId: string): Promise<boolean> => {
   const rows = await db
-    .select({ repoId: userRepos.repoId })
-    .from(userRepos)
-    .where(eq(userRepos.userId, userId));
-  return rows.map((r) => r.repoId);
-};
-
-const ensureRowAccess = async (
-  db: DbClient,
-  userId: string,
-  sessionId: string,
-): Promise<{
-  ownerUserId: string;
-  repoId: string | null;
-} | null> => {
-  const rows = await db
-    .select({ ownerUserId: sessions.userId, repoId: sessions.repoId })
+    .select({ isPrivate: sessions.isPrivate })
     .from(sessions)
     .where(eq(sessions.id, sessionId))
     .limit(1);
   const row = rows[0];
-  if (!row) return null;
-  if (row.ownerUserId === userId) return row;
-  if (!row.repoId) return null;
-  const accessible = await buildAccessibleRepoIds(db, userId);
-  if (accessible.includes(row.repoId)) return row;
-  return null;
+  return Boolean(row) && !row?.isPrivate;
 };
 
 export const getSessionForUser = async (
@@ -60,8 +41,7 @@ export const getSessionForUser = async (
   userId: string,
   sessionId: string,
 ): Promise<SessionDetail | null> => {
-  const access = await ensureRowAccess(db, userId, sessionId);
-  if (!access) return null;
+  if (!(await isReadable(db, sessionId))) return null;
 
   const rows = await db
     .select({
@@ -125,20 +105,11 @@ export const findSessionsForPr = async (
   userId: string,
   prUrl: string,
 ): Promise<SessionDetail[]> => {
-  const accessible = await buildAccessibleRepoIds(db, userId);
-  if (accessible.length === 0) return [];
-
   const rows = await db
     .select({ id: sessions.id })
     .from(sessions)
     .innerJoin(summaries, eq(summaries.sessionId, sessions.id))
-    .where(
-      and(
-        eq(sessions.userId, userId),
-        inArray(sessions.repoId, accessible),
-        sql`${prUrl} = ANY(${summaries.prsReferenced})`,
-      ),
-    );
+    .where(and(eq(sessions.isPrivate, false), sql`${prUrl} = ANY(${summaries.prsReferenced})`));
 
   const out: SessionDetail[] = [];
   for (const r of rows) {
@@ -160,10 +131,8 @@ export const listRecent = async (
   opts: ListRecentOpts = {},
 ): Promise<SessionDetail[]> => {
   const limit = Math.min(Math.max(opts.limit ?? 10, 1), 50);
-  const accessible = await buildAccessibleRepoIds(db, userId);
-  if (accessible.length === 0) return [];
 
-  const filters = [eq(sessions.userId, userId), inArray(sessions.repoId, accessible)];
+  const filters = [eq(sessions.isPrivate, false)];
   if (opts.agent) filters.push(eq(sessions.agent, opts.agent));
   if (opts.repo) {
     const repoRow = await db

@@ -30,7 +30,7 @@ bun run --filter @claude-sessions/web dev
 
 # Terminal 3 — CLI watcher
 bun run --filter @claude-sessions/cli build
-node packages/cli/dist/main.js login --server http://localhost:3000 --email ... --password ...
+node packages/cli/dist/main.js login --server http://localhost:3000
 node packages/cli/dist/main.js enable .
 node packages/cli/dist/main.js watch
 ```
@@ -44,25 +44,19 @@ bun run --filter @claude-sessions/server dev
 
 The static handler (`packages/server/src/routes/static.ts`) auto-detects the dist directory; reserved prefixes (`/api/`, `/mcp`, `/health`) bypass it.
 
-## Seeding a user
+## Signing in
 
-There is no public registration endpoint. Two ways to create a user:
+Sign-in is GitHub OAuth, gated to one org. For local dev, create a GitHub OAuth
+app (callback `http://localhost:3000/api/auth/github/callback`, scopes
+`read:org user:email`) and set `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, and
+`GITHUB_ORG`. Visit `/login` and click **Sign in with GitHub**; a user row is
+auto-created on first login for org members.
 
-### From a quick Node script
+### Seeding a user (tests/repl)
 
-```ts
-import postgres from "postgres";
-import { hashPassword } from "./packages/server/src/auth/argon.js";
-
-const sql = postgres(process.env.DATABASE_URL!);
-await sql`INSERT INTO users (email, password_hash, role)
-          VALUES (${email}, ${await hashPassword(password)}, 'user')`;
-await sql.end();
-```
-
-### Reuse the test helper
-
-`packages/server/tests/helpers/seed.ts` exports `seedUser(db, jwtSecret, opts)`. Useful in repl/test contexts.
+`packages/server/tests/helpers/seed.ts` exports `seedUser(db, jwtSecret, opts)`,
+which inserts a user with a synthetic GitHub identity and returns a bearer token
+— useful in repl/test contexts without going through OAuth.
 
 ## Scripts (root)
 

@@ -5,7 +5,7 @@ import type { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import type { Db } from "../src/db/client.js";
-import { events } from "../src/db/schema.js";
+import { events, sessions } from "../src/db/schema.js";
 import type { Env } from "../src/env.js";
 import { type TestPgHandle, startTestPostgres, truncateAll } from "./helpers/pg-test-container.js";
 import { seedUser } from "./helpers/seed.js";
@@ -17,6 +17,7 @@ const TEST_ENV: Env = {
   OPENAI_EMBED_MODEL: "text-embedding-3-small",
   PORT: 0,
   NODE_ENV: "test",
+  GITHUB_ORG: "test-org",
 };
 
 interface IngestBody {
@@ -134,32 +135,34 @@ describe("POST /api/ingest", () => {
     expect(rows[0]?.c).toBe(2);
   });
 
-  it("REQ-035: returns 403 if user has not enabled the repo", async () => {
+  it("auto-grants the repo on first push (no prior enable needed)", async () => {
     const seed = await seedUser(db.db, env.JWT_SECRET, {
       email: "no-repo@example.test",
       grantRepo: false,
     });
     const payload = buildIngestPayload("s-no-repo", "github.com/foreign/repo", []);
     const res = await post("/api/ingest", seed.token, payload);
-    expect(res.status).toBe(403);
-    const json = (await res.json()) as { error: string };
-    expect(json.error).toBe("repo not enabled for user");
+    expect(res.status).toBe(200);
+    // The session is attributed to the pusher.
+    const rows = await db.db.select().from(sessions).where(eq(sessions.id, "s-no-repo"));
+    expect(rows[0]?.userId).toBe(seed.user.id);
   });
 
-  it("REQ-041: cross-user RBAC — user B's token cannot ingest into user A's repo", async () => {
+  it("any member can ingest into a shared repo; the session is attributed to the pusher", async () => {
     const a = await seedUser(db.db, env.JWT_SECRET, {
       email: "a-rbac@example.test",
-      repoUrl: "github.com/example/a-only",
+      repoUrl: "github.com/example/shared-repo",
     });
     const b = await seedUser(db.db, env.JWT_SECRET, {
       email: "b-rbac@example.test",
-      repoUrl: "github.com/example/b-only",
-      grantRepo: true,
+      grantRepo: false,
     });
-    // B tries to ingest into A's repo
+    // B pushes into the repo A also uses — allowed, stamped as B's session.
     const payload = buildIngestPayload("s-cross", a.repoCanonical, []);
     const res = await post("/api/ingest", b.token, payload);
-    expect(res.status).toBe(403);
+    expect(res.status).toBe(200);
+    const rows = await db.db.select().from(sessions).where(eq(sessions.id, "s-cross"));
+    expect(rows[0]?.userId).toBe(b.user.id);
   });
 
   it("REQ-049: API responses serialize timestamps with Z suffix", async () => {

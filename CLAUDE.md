@@ -75,6 +75,12 @@ Server upserts ingest events on `event_uuid`. Idempotent re-uploads depend on th
 
 Middleware checks `aud` per route. Don't collapse the two.
 
+### Auth is GitHub OAuth (org-gated); reads are global, writes are owner-only
+
+Login is the GitHub OAuth web flow (`GET /api/auth/github/start` → `…/callback`), gated to one org via `GITHUB_ORG` (only `active` members; checked with the user token against `GET /user/memberships/orgs/{org}`). There is **no password login** — `auth/github.ts` is the injectable client seam (stub it in tests via `buildApp(db, env, { githubClient })`), and `db/users.ts` `upsertGithubUser` resolves by `github_id` then **adopts an existing row by email** then inserts. The CLI is unchanged: it still uses the pairing-code flow on top of the web session.
+
+**Reads are global, writes are owner-scoped.** Every GET read path (sessions list, `:id` detail + sub-routes, repos, search, facets, MCP, `lib/sessions-internal.ts`) dropped the `eq(sessions.userId, …)` filter — any authenticated member sees all **non-private** sessions, each carrying an `author { github_login, avatar_url }` (LEFT JOIN `users`). Private sessions are hidden from everyone's lists; their detail stays masked `(private)`. **Mutations keep `eq(sessions.userId, user.id)`** (PATCH, summary POST, blob/artifact write, privacy flip) — don't globalize those. Ingest auto-grants `user_repos` on first push instead of gating. The `role` column is vestigial (no admin concept); don't build authorization on it. `?user=<github_login>` filters lists/search; the users facet powers the dropdowns.
+
 ### TIMESTAMPTZ everywhere
 
 All timestamp columns are `timestamp with time zone`. ISO strings on the wire end in `Z`. Drizzle returns `Date`; raw `postgres-js` template literals return strings (use the query builder for `Z`-suffix assertions).

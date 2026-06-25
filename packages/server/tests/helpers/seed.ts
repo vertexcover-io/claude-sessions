@@ -1,6 +1,5 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { hashPassword } from "../../src/auth/argon.js";
 import { signToken } from "../../src/auth/jwt.js";
 import type { DbClient } from "../../src/db/client.js";
 import { grantUserRepo, upsertRepo } from "../../src/db/repos.js";
@@ -9,7 +8,7 @@ import { users } from "../../src/db/schema.js";
 export interface SeededUser {
   id: string;
   email: string;
-  password: string;
+  githubLogin: string;
   role: "user" | "admin";
 }
 
@@ -22,30 +21,37 @@ export interface SeedResult {
 
 export interface SeedOptions {
   email?: string;
-  password?: string;
+  githubLogin?: string;
+  githubId?: number;
   role?: "user" | "admin";
   repoUrl?: string;
   grantRepo?: boolean;
 }
 
-const randomEmail = (): string => `user-${Math.random().toString(36).slice(2, 10)}@example.test`;
+const randomSuffix = (): string => Math.random().toString(36).slice(2, 10);
 
 export const seedUser = async (
   db: DbClient,
   jwtSecret: string,
   opts: SeedOptions = {},
 ): Promise<SeedResult> => {
-  const email = opts.email ?? randomEmail();
-  const password = opts.password ?? "correct-horse-battery-staple";
+  const githubLogin = opts.githubLogin ?? `user-${randomSuffix()}`;
+  const email = opts.email ?? `${githubLogin}@example.test`;
+  const githubId = opts.githubId ?? Math.floor(Math.random() * 1_000_000_000);
   const role = opts.role ?? "user";
   const repoUrl = opts.repoUrl ?? "github.com/example/repo";
   const grantRepo = opts.grantRepo ?? true;
 
-  const passwordHash = await hashPassword(password);
   const inserted = await db
     .insert(users)
-    .values({ email, passwordHash, role })
-    .returning({ id: users.id, email: users.email, role: users.role });
+    .values({
+      email,
+      githubId,
+      githubLogin,
+      avatarUrl: `https://avatars.test/${githubLogin}`,
+      role,
+    })
+    .returning({ id: users.id, email: users.email, githubLogin: users.githubLogin });
   const row = inserted[0];
   if (!row) throw new Error("Failed to seed user");
 
@@ -57,15 +63,20 @@ export const seedUser = async (
   const token = await signToken(
     {
       sub: row.id,
-      email: row.email,
-      role: role,
+      email: row.email ?? `${githubLogin}@users.noreply.github.com`,
+      role,
       aud: "cli",
     },
     jwtSecret,
   );
 
   return {
-    user: { id: row.id, email: row.email, password, role },
+    user: {
+      id: row.id,
+      email: row.email ?? email,
+      githubLogin: row.githubLogin ?? githubLogin,
+      role,
+    },
     token,
     repoId: repo.id,
     repoCanonical: repo.canonicalUrl,

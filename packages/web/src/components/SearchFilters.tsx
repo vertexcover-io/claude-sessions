@@ -46,15 +46,17 @@ export const SearchFilters = () => {
   const branch = params.get("branch") ?? "";
   const agent = params.get("agent") ?? "";
   const model = params.get("model") ?? "";
+  const user = params.get("user") ?? "";
   const hasPr = params.get("has_pr"); // "true" | "false" | null
   const since = params.get("since") ?? "";
   const tag = params.get("tag") ?? "";
 
-  const hasAny = !!repo || !!branch || !!agent || !!model || hasPr !== null || !!since || !!tag;
+  const hasAny =
+    !!repo || !!branch || !!agent || !!model || !!user || hasPr !== null || !!since || !!tag;
 
   const clearAll = () => {
     const next = new URLSearchParams(params);
-    for (const k of ["repo", "branch", "agent", "model", "has_pr", "since", "tag"]) {
+    for (const k of ["repo", "branch", "agent", "model", "user", "has_pr", "since", "tag"]) {
       next.delete(k);
     }
     setParams(next, { replace: true });
@@ -135,6 +137,23 @@ export const SearchFilters = () => {
           {facets.data?.models.map((m) => (
             <option key={m} value={m}>
               {m}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div>
+        <span className={labelClass}>User</span>
+        <select
+          value={user}
+          onChange={(e) => set("user", e.target.value || null)}
+          className={inputClass}
+          data-testid="filter-user"
+        >
+          <option value="">All</option>
+          {facets.data?.users.map((u) => (
+            <option key={u.github_login} value={u.github_login}>
+              {u.github_login} ({u.count})
             </option>
           ))}
         </select>

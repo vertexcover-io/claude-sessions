@@ -1,6 +1,6 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
-import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { type AuthVariables, buildRequireAuth } from "../auth/middleware.js";
@@ -16,6 +16,7 @@ import {
   sessions,
   summaries,
   summarizationRuns,
+  users,
 } from "../db/schema.js";
 import { getEmbedProvider } from "../embed/index.js";
 import type { Env } from "../env.js";
@@ -95,7 +96,6 @@ const ensureString = (s: unknown): string => (typeof s === "string" ? s : "");
 
 const recentQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
-  repo: z.string().optional(),
   branch: z.string().optional(),
   agent: z.string().optional(),
 });
@@ -105,27 +105,39 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
   router.use("*", buildRequireAuth(env));
 
   /**
-   * GET /api/sessions — recent sessions for the user across all enabled repos.
-   * Used by the web Home / Recent feed. Owner-only (sessions.user_id = user.id).
+   * GET /api/sessions — recent sessions across the whole org (global reads).
+   * Used by the web Home / Recent feed. Private sessions are hidden from
+   * everyone. Each row carries its author (github login + avatar). Optional
+   * `?user=<github_login>` narrows to one author.
    */
   router.get("/", async (c) => {
-    const user = c.get("user");
-    const raw = Object.fromEntries(new URL(c.req.url).searchParams);
-    const parsed = recentQuerySchema.safeParse(raw);
+    const url = new URL(c.req.url);
+    const parsed = recentQuerySchema.safeParse(Object.fromEntries(url.searchParams));
     if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
     const params = parsed.data;
+    // Repeated ?repo= / ?user= params accumulate into OR-sets (multi-select).
+    const repoFilters = url.searchParams.getAll("repo");
+    const userFilters = url.searchParams.getAll("user");
 
-    const filters = [eq(sessions.userId, user.id), isNull(sessions.parentSessionId)];
+    const filters = [isNull(sessions.parentSessionId), eq(sessions.isPrivate, false)];
     if (params.agent) filters.push(eq(sessions.agent, params.agent));
     if (params.branch) filters.push(eq(sessions.branch, params.branch));
-    if (params.repo) {
+    if (userFilters.length > 0) {
+      const lowered = userFilters.map((u) => u.toLowerCase());
+      filters.push(inArray(sql`lower(${users.githubLogin})`, lowered));
+    }
+    if (repoFilters.length > 0) {
       const r = await db
         .select({ id: repos.id })
         .from(repos)
-        .where(eq(repos.canonicalUrl, params.repo))
-        .limit(1);
-      if (!r[0]) return c.json({ sessions: [] });
-      filters.push(eq(sessions.repoId, r[0].id));
+        .where(inArray(repos.canonicalUrl, repoFilters));
+      if (r.length === 0) return c.json({ sessions: [] });
+      filters.push(
+        inArray(
+          sessions.repoId,
+          r.map((x) => x.id),
+        ),
+      );
     }
 
     const rows = await db
@@ -144,10 +156,13 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
         summary: summaries.summary,
         tags: summaries.tags,
         prsReferenced: summaries.prsReferenced,
+        authorLogin: users.githubLogin,
+        authorAvatar: users.avatarUrl,
       })
       .from(sessions)
       .leftJoin(repos, eq(repos.id, sessions.repoId))
       .leftJoin(summaries, eq(summaries.sessionId, sessions.id))
+      .leftJoin(users, eq(users.id, sessions.userId))
       .where(and(...filters))
       .orderBy(desc(sessions.startedAt))
       .limit(params.limit);
@@ -168,6 +183,7 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
         summary: r.summary ?? null,
         tags: r.tags ?? [],
         prs_referenced: r.prsReferenced ?? [],
+        author: r.authorLogin ? { github_login: r.authorLogin, avatar_url: r.authorAvatar } : null,
         display_name: r.name ?? r.title ?? `Session ${r.id.slice(0, 8)}`,
       })),
     });
@@ -179,13 +195,12 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
    * view on the web UI.
    */
   router.get("/:id/events", async (c) => {
-    const user = c.get("user");
     const sessionId = c.req.param("id");
 
     const sessRows = await db
       .select({ id: sessions.id, isPrivate: sessions.isPrivate })
       .from(sessions)
-      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .where(eq(sessions.id, sessionId))
       .limit(1);
     const sess = sessRows[0];
     if (!sess) return c.json({ error: "session not found" }, 404);
@@ -222,13 +237,12 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
    * them as a single "called → completed" pair with both timestamps.
    */
   router.get("/:id/tool-calls", async (c) => {
-    const user = c.get("user");
     const sessionId = c.req.param("id");
 
     const sessRows = await db
       .select({ id: sessions.id, isPrivate: sessions.isPrivate })
       .from(sessions)
-      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .where(eq(sessions.id, sessionId))
       .limit(1);
     const sess = sessRows[0];
     if (!sess) return c.json({ error: "session not found" }, 404);
@@ -311,13 +325,12 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
    * during the session window, mined by the CLI at ingest time.
    */
   router.get("/:id/commits", async (c) => {
-    const user = c.get("user");
     const sessionId = c.req.param("id");
 
     const sessRows = await db
       .select({ id: sessions.id, isPrivate: sessions.isPrivate })
       .from(sessions)
-      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .where(eq(sessions.id, sessionId))
       .limit(1);
     const sess = sessRows[0];
     if (!sess) return c.json({ error: "session not found" }, 404);
@@ -351,15 +364,14 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
    * sibling `:id/events` ownership check. Left-joins the summary for a title.
    */
   router.get("/:id/children", async (c) => {
-    const user = c.get("user");
     const sessionId = c.req.param("id");
 
     const sessRows = await db
-      .select({ id: sessions.id })
+      .select({ id: sessions.id, isPrivate: sessions.isPrivate })
       .from(sessions)
-      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .where(eq(sessions.id, sessionId))
       .limit(1);
-    if (!sessRows[0]) return c.json({ error: "session not found" }, 404);
+    if (!sessRows[0] || sessRows[0].isPrivate) return c.json({ error: "session not found" }, 404);
 
     const rows = await db
       .select({
@@ -373,7 +385,7 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
       })
       .from(sessions)
       .leftJoin(summaries, eq(summaries.sessionId, sessions.id))
-      .where(and(eq(sessions.parentSessionId, sessionId), eq(sessions.userId, user.id)))
+      .where(and(eq(sessions.parentSessionId, sessionId), eq(sessions.isPrivate, false)))
       .orderBy(asc(sessions.startedAt));
 
     return c.json({
@@ -592,15 +604,15 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
    * (REQ-036 generalized to blob reads).
    */
   router.get("/:id/blob", async (c) => {
-    const user = c.get("user");
     const sessionId = c.req.param("id");
 
     const sessRows = await db
-      .select({ id: sessions.id })
+      .select({ id: sessions.id, isPrivate: sessions.isPrivate })
       .from(sessions)
-      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .where(eq(sessions.id, sessionId))
       .limit(1);
-    if (!sessRows[0]) return c.json({ error: "session not found" }, 404);
+    const sess = sessRows[0];
+    if (!sess || sess.isPrivate) return c.json({ error: "session not found" }, 404);
 
     const blobRows = await db
       .select({
@@ -684,13 +696,12 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
    * the web Artifacts tab. Owner-only RBAC; empty for private sessions.
    */
   router.get("/:id/artifacts", async (c) => {
-    const user = c.get("user");
     const sessionId = c.req.param("id");
 
     const sessRows = await db
       .select({ id: sessions.id, isPrivate: sessions.isPrivate })
       .from(sessions)
-      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .where(eq(sessions.id, sessionId))
       .limit(1);
     const sess = sessRows[0];
     if (!sess) return c.json({ error: "session not found" }, 404);
@@ -725,14 +736,13 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
    * an audit_log row before responding.
    */
   router.get("/:id/artifacts/:artifactId", async (c) => {
-    const user = c.get("user");
     const sessionId = c.req.param("id");
     const artifactId = c.req.param("artifactId");
 
     const sessRows = await db
       .select({ id: sessions.id, isPrivate: sessions.isPrivate })
       .from(sessions)
-      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .where(eq(sessions.id, sessionId))
       .limit(1);
     const sess = sessRows[0];
     if (!sess) return c.json({ error: "session not found" }, 404);
@@ -768,17 +778,19 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
    * before responding (REQ-036).
    */
   router.get("/:id", async (c) => {
-    const user = c.get("user");
     const sessionId = c.req.param("id");
 
     const rows = await db
       .select({
         session: sessions,
         repoCanonicalUrl: repos.canonicalUrl,
+        authorLogin: users.githubLogin,
+        authorAvatar: users.avatarUrl,
       })
       .from(sessions)
       .leftJoin(repos, eq(repos.id, sessions.repoId))
-      .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
+      .leftJoin(users, eq(users.id, sessions.userId))
+      .where(eq(sessions.id, sessionId))
       .limit(1);
     const row = rows[0];
     if (!row) return c.json({ error: "session not found" }, 404);
@@ -831,6 +843,9 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
       name: sess.name,
       has_blob: sess.hasBlob,
       display_name: displayName,
+      author: row.authorLogin
+        ? { github_login: row.authorLogin, avatar_url: row.authorAvatar }
+        : null,
       summary: summary
         ? {
             title: summary.title,

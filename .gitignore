@@ -12,3 +12,4 @@ coverage/
 *.pgid
 .claude/
 .playwright-mcp/
+subagent-verify-screenshots/

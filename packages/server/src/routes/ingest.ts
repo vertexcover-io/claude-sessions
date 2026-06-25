@@ -5,7 +5,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { type AuthVariables, buildRequireAuth } from "../auth/middleware.js";
 import type { DbClient } from "../db/client.js";
-import { findUserRepoAccess, upsertRepo } from "../db/repos.js";
+import { grantUserRepo, upsertRepo } from "../db/repos.js";
 import { events, sessionCommits, sessions } from "../db/schema.js";
 import type { Env } from "../env.js";
 import { redactDeep } from "../redact.js";
@@ -65,8 +65,10 @@ export const buildIngestRouter = (db: DbClient, env: Env): Hono<{ Variables: Aut
     const body = parsed.data;
 
     const repo = await upsertRepo(db, body.session.repo.canonical_url);
-    const access = await findUserRepoAccess(db, user.id, repo.id);
-    if (!access) return c.json({ error: "repo not enabled for user" }, 403);
+    // Auto-grant on first push: with org-wide visibility there's no separate
+    // "enable repo" step, so any authenticated member's push provisions the
+    // grant idempotently.
+    await grantUserRepo(db, user.id, repo.id, "owner");
 
     const redacted = body.events.map((e) => ({ ...e, payload: redactDeep(e.payload) }));
 

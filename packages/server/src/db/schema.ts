@@ -2,6 +2,7 @@
 
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   customType,
   index,
@@ -41,13 +42,30 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   },
 });
 
-export const users = pgTable("users", {
-  id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
-  email: text("email").notNull().unique(),
-  passwordHash: text("password_hash").notNull(),
-  role: text("role").notNull().default("user"),
-  createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
-});
+export const users = pgTable(
+  "users",
+  {
+    id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),
+    // email + passwordHash are nullable since the GitHub OAuth (org-gated)
+    // flow replaced password login: OAuth users have no password, and GitHub
+    // may not expose a public email.
+    email: text("email").unique(),
+    passwordHash: text("password_hash"),
+    githubId: bigint("github_id", { mode: "number" }),
+    githubLogin: text("github_login"),
+    avatarUrl: text("avatar_url"),
+    role: text("role").notNull().default("user"),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "date" }).notNull().defaultNow(),
+  },
+  (t) => ({
+    githubIdUniq: uniqueIndex("users_github_id_uniq")
+      .on(t.githubId)
+      .where(sql`github_id IS NOT NULL`),
+    githubLoginUniq: uniqueIndex("users_github_login_uniq")
+      .on(sql`lower(${t.githubLogin})`)
+      .where(sql`github_login IS NOT NULL`),
+  }),
+);
 
 export const repos = pgTable("repos", {
   id: uuid("id").primaryKey().default(sql`gen_random_uuid()`),

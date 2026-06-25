@@ -20,6 +20,7 @@ const TEST_ENV: Env = {
   OPENAI_EMBED_MODEL: "text-embedding-3-small",
   PORT: 0,
   NODE_ENV: "test",
+  GITHUB_ORG: "test-org",
 };
 
 let pg: TestPgHandle;

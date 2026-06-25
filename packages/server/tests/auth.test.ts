@@ -1,12 +1,44 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
+import { eq } from "drizzle-orm";
 import type { Hono } from "hono";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
+import type { GithubClient, GithubProfile } from "../src/auth/github.js";
 import type { Db } from "../src/db/client.js";
+import { users } from "../src/db/schema.js";
 import type { Env } from "../src/env.js";
 import { type TestPgHandle, startTestPostgres, truncateAll } from "./helpers/pg-test-container.js";
 import { seedUser } from "./helpers/seed.js";
+
+const OCTOCAT: GithubProfile = {
+  id: 4242,
+  login: "octocat",
+  avatarUrl: "https://avatars.test/octocat",
+  email: "octo@example.test",
+};
+
+const stubGithub = (opts: { member: boolean; profile?: GithubProfile }): GithubClient => {
+  const profile = opts.profile ?? OCTOCAT;
+  return {
+    exchangeCode: async () => ({ accessToken: "stub-token" }),
+    getProfile: async () => profile,
+    getPrimaryEmail: async () => profile.email,
+    isOrgMember: async () => opts.member,
+  };
+};
+
+// Drive /github/start, returning the raw oauth_state cookie value so the
+// callback test can replay it as both the query param and the cookie.
+const startOauth = async (testApp: Hono): Promise<string> => {
+  const res = await testApp.request("/api/auth/github/start");
+  expect(res.status).toBe(302);
+  expect(res.headers.get("location") ?? "").toContain("github.com/login/oauth/authorize");
+  const setCookie = res.headers.get("set-cookie") ?? "";
+  const m = setCookie.match(/oauth_state=([^;]+)/);
+  if (!m?.[1]) throw new Error("no oauth_state cookie");
+  return m[1];
+};
 
 const TEST_ENV: Env = {
   DATABASE_URL: "",
@@ -15,6 +47,7 @@ const TEST_ENV: Env = {
   OPENAI_EMBED_MODEL: "text-embedding-3-small",
   PORT: 0,
   NODE_ENV: "test",
+  GITHUB_ORG: "test-org",
 };
 
 let pg: TestPgHandle;
@@ -46,48 +79,105 @@ describe("GET /health", () => {
   });
 });
 
-describe("POST /api/auth/login (REQ-030, REQ-031)", () => {
-  it("returns token + cookie on valid credentials", async () => {
-    const seed = await seedUser(db.db, env.JWT_SECRET, {
-      email: "alice@example.test",
-      password: "s3cret-pass",
-    });
-    const res = await app.request("/api/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: seed.user.email, password: seed.user.password }),
-    });
-    expect(res.status).toBe(200);
-    const json = (await res.json()) as { token: string; user: { email: string } };
-    expect(json.token).toBeTypeOf("string");
-    expect(json.user.email).toBe("alice@example.test");
+describe("GitHub OAuth login", () => {
+  const oauthEnv = (): Env => ({
+    ...env,
+    GITHUB_CLIENT_ID: "test-client-id",
+    GITHUB_CLIENT_SECRET: "test-client-secret",
+  });
+
+  it("GET /github/start redirects to GitHub and sets the state cookie", async () => {
+    const a = buildApp(db.db, oauthEnv(), { githubClient: stubGithub({ member: true }) });
+    const res = await a.request("/api/auth/github/start");
+    expect(res.status).toBe(302);
+    const loc = res.headers.get("location") ?? "";
+    expect(loc).toContain("https://github.com/login/oauth/authorize");
+    expect(loc).toContain("scope=read%3Aorg+user%3Aemail");
     const setCookie = res.headers.get("set-cookie") ?? "";
-    expect(setCookie).toMatch(/session=/);
+    expect(setCookie).toMatch(/oauth_state=/);
     expect(setCookie.toLowerCase()).toContain("httponly");
   });
 
-  it("rejects invalid password with 401", async () => {
-    await seedUser(db.db, env.JWT_SECRET, {
-      email: "bob@example.test",
-      password: "real-pass",
+  it("callback creates a user + session cookie for an org member", async () => {
+    const a = buildApp(db.db, oauthEnv(), { githubClient: stubGithub({ member: true }) });
+    const state = await startOauth(a);
+    const res = await a.request(`/api/auth/github/callback?code=abc&state=${state}`, {
+      headers: { cookie: `oauth_state=${state}` },
     });
-    const res = await app.request("/api/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "bob@example.test", password: "wrong-pass" }),
-    });
-    expect(res.status).toBe(401);
-    const json = (await res.json()) as { error: string };
-    expect(json.error).toMatch(/invalid email or password/i);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/");
+    expect((res.headers.get("set-cookie") ?? "").toLowerCase()).toContain("session=");
+
+    const rows = await db.db.select().from(users).where(eq(users.githubId, OCTOCAT.id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.githubLogin).toBe("octocat");
+    expect(rows[0]?.avatarUrl).toBe(OCTOCAT.avatarUrl);
   });
 
-  it("rejects unknown email with 401", async () => {
-    const res = await app.request("/api/auth/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: "nobody@example.test", password: "x" }),
+  it("callback rejects a non-org-member with no user row and no session", async () => {
+    const a = buildApp(db.db, oauthEnv(), { githubClient: stubGithub({ member: false }) });
+    const state = await startOauth(a);
+    const res = await a.request(`/api/auth/github/callback?code=abc&state=${state}`, {
+      headers: { cookie: `oauth_state=${state}` },
     });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/login?error=not_member");
+    expect((res.headers.get("set-cookie") ?? "").toLowerCase()).not.toContain("session=");
+    const rows = await db.db.select().from(users).where(eq(users.githubId, OCTOCAT.id));
+    expect(rows).toHaveLength(0);
+  });
+
+  it("callback rejects a state mismatch (CSRF guard)", async () => {
+    const a = buildApp(db.db, oauthEnv(), { githubClient: stubGithub({ member: true }) });
+    const state = await startOauth(a);
+    const res = await a.request(`/api/auth/github/callback?code=abc&state=${state}`, {
+      headers: { cookie: "oauth_state=different-value" },
+    });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/login?error=state");
+  });
+
+  it("a second login with the same github_id updates rather than duplicates", async () => {
+    const a = buildApp(db.db, oauthEnv(), {
+      githubClient: stubGithub({ member: true, profile: { ...OCTOCAT, login: "octocat-renamed" } }),
+    });
+    // First login.
+    let state = await startOauth(a);
+    await a.request(`/api/auth/github/callback?code=abc&state=${state}`, {
+      headers: { cookie: `oauth_state=${state}` },
+    });
+    // Second login (same id, new login handle).
+    state = await startOauth(a);
+    await a.request(`/api/auth/github/callback?code=abc&state=${state}`, {
+      headers: { cookie: `oauth_state=${state}` },
+    });
+    const rows = await db.db.select().from(users).where(eq(users.githubId, OCTOCAT.id));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.githubLogin).toBe("octocat-renamed");
+  });
+
+  it("adopts an existing user row by email, preserving its id", async () => {
+    // Pre-existing (e.g. legacy) row with the same email but no github identity.
+    const existing = await db.db
+      .insert(users)
+      .values({ email: OCTOCAT.email, role: "user" })
+      .returning({ id: users.id });
+    const existingId = existing[0]?.id;
+
+    const a = buildApp(db.db, oauthEnv(), { githubClient: stubGithub({ member: true }) });
+    const state = await startOauth(a);
+    await a.request(`/api/auth/github/callback?code=abc&state=${state}`, {
+      headers: { cookie: `oauth_state=${state}` },
+    });
+
+    const rows = await db.db
+      .select()
+      .from(users)
+      .where(eq(users.email, OCTOCAT.email ?? ""));
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(existingId);
+    expect(rows[0]?.githubId).toBe(OCTOCAT.id);
+    expect(rows[0]?.githubLogin).toBe("octocat");
   });
 });
 

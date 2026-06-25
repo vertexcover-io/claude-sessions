@@ -2,7 +2,7 @@
 
 import { type SQL, and, desc, eq, gte, inArray, sql } from "drizzle-orm";
 import type { DbClient } from "../db/client.js";
-import { repos, sessions, summaries, userRepos } from "../db/schema.js";
+import { repos, sessions, summaries, users } from "../db/schema.js";
 import { getEmbedProvider } from "../embed/index.js";
 
 export interface SearchFilters {
@@ -13,7 +13,13 @@ export interface SearchFilters {
   tag?: string;
   hasPr?: boolean;
   since?: string;
+  user?: string;
   limit?: number;
+}
+
+export interface SearchAuthor {
+  github_login: string;
+  avatar_url: string | null;
 }
 
 export interface SearchResultRow {
@@ -27,6 +33,7 @@ export interface SearchResultRow {
   started_at: string;
   ended_at: string;
   total_cost_usd: string;
+  author: SearchAuthor | null;
 }
 
 export interface SearchResponse {
@@ -64,7 +71,6 @@ const reciprocalRankFusion = (
  */
 export const searchInternal = async (
   db: DbClient,
-  userId: string,
   query: string,
   filters: SearchFilters = {},
 ): Promise<SearchResponse> => {
@@ -72,20 +78,12 @@ export const searchInternal = async (
   const trimmedQuery = query.trim();
   const hasQuery = trimmedQuery.length > 0;
 
-  const accessibleRepos = await db
-    .select({ repoId: userRepos.repoId })
-    .from(userRepos)
-    .where(eq(userRepos.userId, userId));
-  const accessibleRepoIds = accessibleRepos.map((r) => r.repoId);
-
-  if (accessibleRepoIds.length === 0) {
-    return { results: [], strategy: hasQuery ? "rrf" : "recency" };
+  // Global reads: any authenticated org member searches across everyone's
+  // sessions. Private sessions are hidden from everyone.
+  const baseFilters: SQL[] = [eq(sessions.isPrivate, false)];
+  if (filters.user) {
+    baseFilters.push(sql`lower(${users.githubLogin}) = ${filters.user.toLowerCase()}`);
   }
-
-  const baseFilters: SQL[] = [
-    eq(sessions.userId, userId),
-    inArray(sessions.repoId, accessibleRepoIds),
-  ];
   if (filters.branch) baseFilters.push(eq(sessions.branch, filters.branch));
   if (filters.agent) baseFilters.push(eq(sessions.agent, filters.agent));
   if (filters.model) baseFilters.push(eq(sessions.model, filters.model));
@@ -137,6 +135,7 @@ export const searchInternal = async (
       })
       .from(sessions)
       .innerJoin(summaries, eq(summaries.sessionId, sessions.id))
+      .leftJoin(users, eq(users.id, sessions.userId))
       .where(
         and(
           filterSql,
@@ -155,6 +154,7 @@ export const searchInternal = async (
       SELECT sessions.id::text AS id
       FROM sessions
       JOIN embeddings ON embeddings.session_id = sessions.id
+      LEFT JOIN users ON users.id = sessions.user_id
       WHERE ${filterSql}
       ORDER BY embeddings.embedding <=> ${qVecLiteral}::vector
       LIMIT ${TOP_K}
@@ -171,6 +171,7 @@ export const searchInternal = async (
     const recencyRows = await db
       .select({ id: sessions.id })
       .from(sessions)
+      .leftJoin(users, eq(users.id, sessions.userId))
       .where(filterSql)
       .orderBy(desc(sessions.startedAt))
       .limit(limit);
@@ -196,10 +197,13 @@ export const searchInternal = async (
       tags: summaries.tags,
       prsReferenced: summaries.prsReferenced,
       repoUrl: repos.canonicalUrl,
+      authorLogin: users.githubLogin,
+      authorAvatar: users.avatarUrl,
     })
     .from(sessions)
     .leftJoin(summaries, eq(summaries.sessionId, sessions.id))
     .leftJoin(repos, eq(repos.id, sessions.repoId))
+    .leftJoin(users, eq(users.id, sessions.userId))
     .where(
       inArray(
         sessions.id,
@@ -229,6 +233,7 @@ export const searchInternal = async (
       started_at: h.startedAt.toISOString(),
       ended_at: h.endedAt.toISOString(),
       total_cost_usd: h.totalCostUsd,
+      author: h.authorLogin ? { github_login: h.authorLogin, avatar_url: h.authorAvatar } : null,
     })),
     strategy: hasQuery ? "rrf" : "recency",
   };

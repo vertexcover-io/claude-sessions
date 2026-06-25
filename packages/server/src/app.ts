@@ -1,6 +1,7 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
 import { Hono } from "hono";
+import type { GithubClient } from "./auth/github.js";
 import type { DbClient } from "./db/client.js";
 import type { Env } from "./env.js";
 import { buildAuthRouter } from "./routes/auth.js";
@@ -15,13 +16,14 @@ import { buildSummarizationRunsRouter } from "./routes/summarization-runs.js";
 
 export interface BuildAppOptions {
   webDist?: string;
+  githubClient?: GithubClient;
 }
 
 export const buildApp = (db: DbClient, env: Env, opts: BuildAppOptions = {}): Hono => {
   const app = new Hono();
   app.route("/health", buildHealthRouter());
   app.route("/api/health", buildHealthRouter());
-  app.route("/api/auth", buildAuthRouter(db, env));
+  app.route("/api/auth", buildAuthRouter(db, env, opts.githubClient));
   app.route("/api/repos", buildReposRouter(db, env));
   app.route("/api/ingest", buildIngestRouter(db, env));
   app.route("/api/sessions", buildSessionsRouter(db, env));

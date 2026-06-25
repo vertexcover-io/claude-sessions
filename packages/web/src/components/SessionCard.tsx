@@ -4,6 +4,7 @@ import { Clock, GitBranch, MessageSquare } from "lucide-react";
 import { Link } from "react-router-dom";
 import { formatCost, formatDuration, formatRepo } from "../lib/cn";
 import type { SessionListItem } from "../lib/types";
+import { AuthorChip } from "./AuthorChip";
 
 export const SessionCard = ({ session }: { session: SessionListItem }) => {
   return (
@@ -39,6 +40,7 @@ export const SessionCard = ({ session }: { session: SessionListItem }) => {
           {formatDuration(session.started_at, session.ended_at)}
         </span>
         {session.model && <span className="font-mono">{session.model}</span>}
+        {session.author && <AuthorChip author={session.author} />}
       </div>
       {session.tags.length > 0 && (
         <div className="mt-3 flex flex-wrap gap-1">

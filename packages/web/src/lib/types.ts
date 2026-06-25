@@ -2,8 +2,15 @@
 
 export interface User {
   id: string;
-  email: string;
+  email: string | null;
   role: "user" | "admin";
+  github_login: string | null;
+  avatar_url: string | null;
+}
+
+export interface Author {
+  github_login: string;
+  avatar_url: string | null;
 }
 
 export interface RepoSummary {
@@ -30,6 +37,7 @@ export interface SessionListItem {
   summary: string | null;
   tags: string[];
   prs_referenced: string[];
+  author?: Author | null;
   display_name: string;
 }
 
@@ -77,6 +85,7 @@ export interface SessionDetail {
   name?: string | null;
   has_blob?: boolean;
   display_name: string;
+  author?: Author | null;
   summary: SessionSummaryPayload | null;
   learnings?: SessionLearning[];
 }
@@ -122,11 +131,17 @@ export interface SessionCommit {
   deletions: number | null;
 }
 
+export interface RepoFacets {
+  branches: string[];
+  users: Array<{ github_login: string; avatar_url: string | null; count: number }>;
+}
+
 export interface SearchFacets {
   repos: Array<{ canonical_url: string; display_name: string | null }>;
   branches: string[];
   models: string[];
   agents: string[];
+  users: Array<{ github_login: string; avatar_url: string | null; count: number }>;
   tags: string[];
 }
 
@@ -167,4 +182,5 @@ export interface SearchResult {
   started_at: string;
   ended_at: string;
   total_cost_usd: string;
+  author?: Author | null;
 }

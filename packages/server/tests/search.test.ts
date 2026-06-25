@@ -17,6 +17,7 @@ const TEST_ENV: Env = {
   OPENAI_EMBED_MODEL: "text-embedding-3-small",
   PORT: 0,
   NODE_ENV: "test",
+  GITHUB_ORG: "test-org",
 };
 
 let pg: TestPgHandle;
@@ -117,6 +118,7 @@ interface SearchResp {
     started_at: string;
     ended_at: string;
     total_cost_usd: string;
+    author: { github_login: string; avatar_url: string | null } | null;
   }>;
   strategy: string;
 }
@@ -153,13 +155,13 @@ describe("GET /api/search (REQ-022)", () => {
     expect(json.results[0]?.session_id).toBe("s-fts-hit");
   });
 
-  it("RBAC: user A's query never returns user B's sessions", async () => {
+  it("global reads: user A's query DOES return user B's sessions, with author", async () => {
     const a = await seedUser(db.db, env.JWT_SECRET, {
-      email: "search-a@example.test",
+      githubLogin: "search-a",
       repoUrl: "github.com/example/search-a",
     });
     const b = await seedUser(db.db, env.JWT_SECRET, {
-      email: "search-b@example.test",
+      githubLogin: "search-b",
       repoUrl: "github.com/example/search-b",
     });
     await seedSessionWithSummary({
@@ -174,7 +176,9 @@ describe("GET /api/search (REQ-022)", () => {
     const res = await get("/api/search?q=top-secret+deployment", a.token);
     expect(res.status).toBe(200);
     const json = (await res.json()) as SearchResp;
-    expect(json.results.find((r) => r.session_id === "s-secret-of-b")).toBeUndefined();
+    const hit = json.results.find((r) => r.session_id === "s-secret-of-b");
+    expect(hit).toBeDefined();
+    expect(hit?.author?.github_login).toBe("search-b");
   });
 
   it("filters by repo, branch, agent, has_pr, since", async () => {

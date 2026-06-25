@@ -14,6 +14,14 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .optional()
     .transform((v) => (v === undefined ? undefined : v === "true")),
+  // GitHub OAuth (org-gated login). Client id/secret are optional so tests
+  // and non-OAuth local runs still boot; the OAuth route throws a clear error
+  // at request time when they're missing (mirrors the OPENAI_API_KEY pattern).
+  GITHUB_CLIENT_ID: z.string().optional(),
+  GITHUB_CLIENT_SECRET: z.string().optional(),
+  GITHUB_ORG: z.string().default("vertexcover-io"),
+  // Used to build the OAuth redirect_uri; falls back to the request origin.
+  APP_BASE_URL: z.string().url().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

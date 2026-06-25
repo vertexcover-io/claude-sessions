@@ -27,6 +27,7 @@ const TEST_ENV: Env = {
   OPENAI_EMBED_MODEL: "text-embedding-3-small",
   PORT: 0,
   NODE_ENV: "test",
+  GITHUB_ORG: "test-org",
 };
 
 let pg: TestPgHandle;
@@ -466,13 +467,13 @@ describe("PUT /api/sessions/:id/blob (REQ-061) and GET (REQ-062)", () => {
     expect(Buffer.from(got).equals(Buffer.from(original))).toBe(true);
   });
 
-  it("RBAC: another user cannot GET the blob (returns 404)", async () => {
+  it("global reads: another user CAN GET the blob (200)", async () => {
     const a = await seedUser(db.db, env.JWT_SECRET, {
-      email: "blob-rbac-a@example.test",
+      githubLogin: "blob-rbac-a",
       repoUrl: "github.com/example/blob-rbac-a",
     });
     const b = await seedUser(db.db, env.JWT_SECRET, {
-      email: "blob-rbac-b@example.test",
+      githubLogin: "blob-rbac-b",
       repoUrl: "github.com/example/blob-rbac-b",
     });
     const sessionId = "session-blob-rbac";
@@ -480,11 +481,11 @@ describe("PUT /api/sessions/:id/blob (REQ-061) and GET (REQ-062)", () => {
     await put(
       `/api/sessions/${sessionId}/blob`,
       a.token,
-      new TextEncoder().encode("private bytes\n"),
+      new TextEncoder().encode("shared bytes\n"),
     );
 
     const res = await get(`/api/sessions/${sessionId}/blob`, b.token);
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(200);
   });
 
   it("audit_log row written on GET", async () => {
@@ -622,19 +623,19 @@ describe("GET /api/sessions/:id (REQ-036, REQ-059)", () => {
     expect(after[0]?.action).toBe("read_session");
   });
 
-  it("404 for another user's session (RBAC)", async () => {
+  it("global reads: another user CAN GET the session detail (200)", async () => {
     const a = await seedUser(db.db, env.JWT_SECRET, {
-      email: "rbac-a@example.test",
+      githubLogin: "rbac-a",
       repoUrl: "github.com/example/rbac-a",
     });
     const b = await seedUser(db.db, env.JWT_SECRET, {
-      email: "rbac-b@example.test",
+      githubLogin: "rbac-b",
       repoUrl: "github.com/example/rbac-b",
     });
     const sessionId = "session-rbac-cross";
     await insertSession(sessionId, a.user.id, a.repoId);
     const r = await get(`/api/sessions/${sessionId}`, b.token);
-    expect(r.status).toBe(404);
+    expect(r.status).toBe(200);
   });
 });
 
@@ -915,13 +916,13 @@ describe("artifacts: POST + GET list + GET one", () => {
     expect(res.status).toBe(413);
   });
 
-  it("RBAC: another user cannot POST, list, or fetch artifacts (404)", async () => {
+  it("another user CANNOT POST artifacts (404) but CAN list them (global reads)", async () => {
     const a = await seedUser(db.db, env.JWT_SECRET, {
-      email: "artifact-rbac-a@example.test",
+      githubLogin: "artifact-rbac-a",
       repoUrl: "github.com/example/artifact-rbac-a",
     });
     const b = await seedUser(db.db, env.JWT_SECRET, {
-      email: "artifact-rbac-b@example.test",
+      githubLogin: "artifact-rbac-b",
       repoUrl: "github.com/example/artifact-rbac-b",
     });
     const sessionId = "session-artifact-rbac";
@@ -932,6 +933,7 @@ describe("artifacts: POST + GET list + GET one", () => {
       content: "# a",
     });
 
+    // Write stays owner-only.
     expect(
       (
         await postArtifact(sessionId, b.token, {
@@ -941,7 +943,8 @@ describe("artifacts: POST + GET list + GET one", () => {
         })
       ).status,
     ).toBe(404);
-    expect((await get(`/api/sessions/${sessionId}/artifacts`, b.token)).status).toBe(404);
+    // Read is global.
+    expect((await get(`/api/sessions/${sessionId}/artifacts`, b.token)).status).toBe(200);
   });
 
   it("is_private=true scrub deletes artifacts", async () => {
@@ -1018,5 +1021,297 @@ describe("disable + purge cascade (REQ-037)", () => {
     expect(
       await db.db.select().from(sessionBlobs).where(eq(sessionBlobs.sessionId, s1)),
     ).toHaveLength(0);
+  });
+});
+
+describe("global reads + attribution (GitHub OAuth)", () => {
+  it("GET /api/sessions returns OTHER users' sessions, with author + private hidden", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "alice",
+      repoUrl: "github.com/example/shared",
+    });
+    const bob = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "bob",
+      repoUrl: "github.com/example/shared",
+    });
+    await insertSession("sess-alice", alice.user.id, alice.repoId);
+    await insertSession("sess-bob", bob.user.id, bob.repoId);
+    // A private session owned by bob must be hidden from everyone.
+    await db.db.update(sessions).set({ isPrivate: true }).where(eq(sessions.id, "sess-bob"));
+    await insertSession("sess-bob-public", bob.user.id, bob.repoId);
+
+    // Alice sees bob's public session (global reads), tagged with the author.
+    const res = await get("/api/sessions?limit=50", alice.token);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      sessions: Array<{ id: string; author: { github_login: string } | null }>;
+    };
+    const ids = json.sessions.map((s) => s.id);
+    expect(ids).toContain("sess-alice");
+    expect(ids).toContain("sess-bob-public");
+    expect(ids).not.toContain("sess-bob"); // private hidden
+    const bobPublic = json.sessions.find((s) => s.id === "sess-bob-public");
+    expect(bobPublic?.author?.github_login).toBe("bob");
+  });
+
+  it("GET /api/sessions with repeated ?user= ORs the authors (multi-select)", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "feed-alice",
+      repoUrl: "github.com/example/feed",
+    });
+    const bob = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "feed-bob",
+      repoUrl: "github.com/example/feed",
+    });
+    const carol = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "feed-carol",
+      repoUrl: "github.com/example/feed",
+    });
+    await insertSession("feed-a", alice.user.id, alice.repoId);
+    await insertSession("feed-b", bob.user.id, bob.repoId);
+    await insertSession("feed-c", carol.user.id, carol.repoId);
+
+    const res = await get("/api/sessions?user=feed-alice&user=feed-bob&limit=50", carol.token);
+    const json = (await res.json()) as { sessions: Array<{ id: string }> };
+    expect(json.sessions.map((s) => s.id).sort()).toEqual(["feed-a", "feed-b"]);
+  });
+
+  it("GET /api/sessions with repeated ?repo= ORs the repos (multi-select)", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "feed-repo-a",
+      repoUrl: "github.com/example/feed-r1",
+    });
+    const bob = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "feed-repo-b",
+      repoUrl: "github.com/example/feed-r2",
+    });
+    const carol = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "feed-repo-c",
+      repoUrl: "github.com/example/feed-r3",
+    });
+    await insertSession("fr-a", alice.user.id, alice.repoId);
+    await insertSession("fr-b", bob.user.id, bob.repoId);
+    await insertSession("fr-c", carol.user.id, carol.repoId);
+
+    const res = await get(
+      `/api/sessions?repo=${encodeURIComponent(alice.repoCanonical)}&repo=${encodeURIComponent(bob.repoCanonical)}&limit=50`,
+      carol.token,
+    );
+    const json = (await res.json()) as { sessions: Array<{ id: string }> };
+    const ids = json.sessions.map((s) => s.id);
+    expect(ids).toContain("fr-a");
+    expect(ids).toContain("fr-b");
+    expect(ids).not.toContain("fr-c");
+  });
+
+  it("GET /api/sessions?user=<login> narrows to one author", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "alice2",
+      repoUrl: "github.com/example/shared2",
+    });
+    const bob = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "bob2",
+      repoUrl: "github.com/example/shared2",
+    });
+    await insertSession("a2", alice.user.id, alice.repoId);
+    await insertSession("b2", bob.user.id, bob.repoId);
+
+    const res = await get("/api/sessions?user=bob2&limit=50", alice.token);
+    const json = (await res.json()) as { sessions: Array<{ id: string }> };
+    const ids = json.sessions.map((s) => s.id);
+    expect(ids).toEqual(["b2"]);
+  });
+
+  it("a private session's blob and children are hidden from everyone (404 / empty)", async () => {
+    const owner = await seedUser(db.db, env.JWT_SECRET, { githubLogin: "priv-owner" });
+    const other = await seedUser(db.db, env.JWT_SECRET, { githubLogin: "priv-other" });
+    await insertSession("priv-parent", owner.user.id, owner.repoId);
+    await put("/api/sessions/priv-parent/blob", owner.token, new TextEncoder().encode("secret\n"));
+    // A private child of a public parent must not surface in the children list.
+    await insertSession("priv-child", owner.user.id, owner.repoId);
+    await db.db
+      .update(sessions)
+      .set({ parentSessionId: "priv-parent", isPrivate: true })
+      .where(eq(sessions.id, "priv-child"));
+
+    // Children list (parent is public) excludes the private child.
+    const childrenRes = await get("/api/sessions/priv-parent/children", other.token);
+    expect(childrenRes.status).toBe(200);
+    const childrenJson = (await childrenRes.json()) as { children: Array<{ id: string }> };
+    expect(childrenJson.children.map((ch) => ch.id)).not.toContain("priv-child");
+
+    // Now mark the parent private — its blob and children endpoints 404 for all.
+    await db.db.update(sessions).set({ isPrivate: true }).where(eq(sessions.id, "priv-parent"));
+    expect((await get("/api/sessions/priv-parent/blob", other.token)).status).toBe(404);
+    expect((await get("/api/sessions/priv-parent/children", other.token)).status).toBe(404);
+  });
+
+  it("a non-owner can open another user's session detail", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, { githubLogin: "alice3" });
+    const bob = await seedUser(db.db, env.JWT_SECRET, { githubLogin: "bob3" });
+    await insertSession("detail-bob", bob.user.id, bob.repoId);
+    const res = await get("/api/sessions/detail-bob", alice.token);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { id: string; author: { github_login: string } | null };
+    expect(json.id).toBe("detail-bob");
+    expect(json.author?.github_login).toBe("bob3");
+  });
+
+  it("a non-owner CANNOT mutate another user's session (PATCH stays owner-only)", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, { githubLogin: "alice4" });
+    const bob = await seedUser(db.db, env.JWT_SECRET, { githubLogin: "bob4" });
+    await insertSession("mut-bob", bob.user.id, bob.repoId);
+    const res = await app.request("/api/sessions/mut-bob", {
+      method: "PATCH",
+      headers: { "content-type": "application/json", authorization: `Bearer ${alice.token}` },
+      body: JSON.stringify({ name: "hijacked" }),
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("GET /api/repos/:canonical/facets (repo-scoped filters)", () => {
+  const insertOn = async (
+    id: string,
+    userId: string,
+    repoId: string,
+    branch: string,
+    isPrivate = false,
+  ): Promise<void> => {
+    await db.db.insert(sessions).values({
+      id,
+      userId,
+      repoId,
+      agent: "claude-code",
+      agentVersion: "1.0.0",
+      branch,
+      sourceCwdHint: "/tmp/work",
+      model: "claude-3-5-sonnet",
+      permissionMode: "default",
+      startedAt: new Date("2026-05-01T10:00:00.000Z"),
+      endedAt: new Date("2026-05-01T10:30:00.000Z"),
+      totalInputTokens: 100,
+      totalOutputTokens: 50,
+      totalCostUsd: "0.01",
+      isPrivate,
+    });
+  };
+
+  it("users facet lists ONLY members who pushed ≥1 session in this repo", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "facet-alice",
+      repoUrl: "github.com/example/facets",
+    });
+    const bob = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "facet-bob",
+      repoUrl: "github.com/example/facets",
+    });
+    // Carol exists and has a session, but only in a DIFFERENT repo.
+    const carol = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "facet-carol",
+      repoUrl: "github.com/example/other",
+    });
+    await insertOn("f-alice", alice.user.id, alice.repoId, "main");
+    await insertOn("f-bob", bob.user.id, bob.repoId, "feat/x");
+    await insertOn("f-carol", carol.user.id, carol.repoId, "main");
+
+    const res = await get(
+      `/api/repos/${encodeURIComponent(alice.repoCanonical)}/facets`,
+      alice.token,
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as {
+      branches: string[];
+      users: Array<{ github_login: string; count: number }>;
+    };
+    const logins = json.users.map((u) => u.github_login).sort();
+    expect(logins).toEqual(["facet-alice", "facet-bob"]);
+    expect(logins).not.toContain("facet-carol");
+    expect(json.branches.sort()).toEqual(["feat/x", "main"]);
+  });
+
+  it("excludes authors whose only session in this repo is private", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "facet-pub",
+      repoUrl: "github.com/example/facets-priv",
+    });
+    const bob = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "facet-priv",
+      repoUrl: "github.com/example/facets-priv",
+    });
+    await insertOn("fp-alice", alice.user.id, alice.repoId, "main");
+    await insertOn("fp-bob", bob.user.id, bob.repoId, "secret", true);
+
+    const res = await get(
+      `/api/repos/${encodeURIComponent(alice.repoCanonical)}/facets`,
+      alice.token,
+    );
+    const json = (await res.json()) as {
+      branches: string[];
+      users: Array<{ github_login: string }>;
+    };
+    expect(json.users.map((u) => u.github_login)).toEqual(["facet-pub"]);
+    expect(json.branches).not.toContain("secret");
+  });
+
+  it("GET /:canonical/sessions?branch=<b> narrows to that branch", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "branch-alice",
+      repoUrl: "github.com/example/branchfilter",
+    });
+    await insertOn("bf-main", alice.user.id, alice.repoId, "main");
+    await insertOn("bf-feat", alice.user.id, alice.repoId, "feat/y");
+
+    const res = await get(
+      `/api/repos/${encodeURIComponent(alice.repoCanonical)}/sessions?branch=feat/y`,
+      alice.token,
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { sessions: Array<{ id: string }> };
+    expect(json.sessions.map((s) => s.id)).toEqual(["bf-feat"]);
+  });
+
+  it("repeated ?branch= params OR together (multi-select)", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "multi-branch",
+      repoUrl: "github.com/example/multibranch",
+    });
+    await insertOn("mb-main", alice.user.id, alice.repoId, "main");
+    await insertOn("mb-demo", alice.user.id, alice.repoId, "demo");
+    await insertOn("mb-feat", alice.user.id, alice.repoId, "feat/z");
+
+    const res = await get(
+      `/api/repos/${encodeURIComponent(alice.repoCanonical)}/sessions?branch=main&branch=demo`,
+      alice.token,
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { sessions: Array<{ id: string }> };
+    expect(json.sessions.map((s) => s.id).sort()).toEqual(["mb-demo", "mb-main"]);
+  });
+
+  it("repeated ?user= params OR together (multi-select)", async () => {
+    const alice = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "multi-u-alice",
+      repoUrl: "github.com/example/multiuser",
+    });
+    const bob = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "multi-u-bob",
+      repoUrl: "github.com/example/multiuser",
+    });
+    const carol = await seedUser(db.db, env.JWT_SECRET, {
+      githubLogin: "multi-u-carol",
+      repoUrl: "github.com/example/multiuser",
+    });
+    await insertOn("mu-alice", alice.user.id, alice.repoId, "main");
+    await insertOn("mu-bob", bob.user.id, bob.repoId, "main");
+    await insertOn("mu-carol", carol.user.id, carol.repoId, "main");
+
+    const res = await get(
+      `/api/repos/${encodeURIComponent(alice.repoCanonical)}/sessions?user=multi-u-alice&user=multi-u-bob`,
+      alice.token,
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { sessions: Array<{ id: string }> };
+    expect(json.sessions.map((s) => s.id).sort()).toEqual(["mu-alice", "mu-bob"]);
   });
 });
