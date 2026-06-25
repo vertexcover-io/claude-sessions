@@ -38,12 +38,11 @@ export const buildSummarizationRunsRouter = (
   router.use("*", buildRequireAuth(env));
 
   router.get("/", async (c) => {
-    const user = c.get("user");
     const parsed = listQuery.safeParse(Object.fromEntries(new URL(c.req.url).searchParams));
     if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
     const q = parsed.data;
 
-    const filters = [eq(sessions.userId, user.id)];
+    const filters = [eq(sessions.isPrivate, false)];
     if (q.since) filters.push(gte(summarizationRuns.startedAt, new Date(q.since)));
     if (q.status) filters.push(eq(summarizationRuns.status, q.status));
     if (q.session_id) filters.push(eq(summarizationRuns.sessionId, q.session_id));
@@ -80,12 +79,11 @@ export const buildSummarizationRunsRouter = (
   });
 
   router.get("/stats", async (c) => {
-    const user = c.get("user");
     const parsed = statsQuery.safeParse(Object.fromEntries(new URL(c.req.url).searchParams));
     if (!parsed.success) return c.json({ error: parsed.error.flatten() }, 400);
     const sinceDate = resolveSince(parsed.data.since, parsed.data.since_days);
 
-    const filters = [eq(sessions.userId, user.id)];
+    const filters = [eq(sessions.isPrivate, false)];
     if (sinceDate) filters.push(gte(summarizationRuns.startedAt, sinceDate));
 
     const aggRows = await db

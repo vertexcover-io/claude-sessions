@@ -32,7 +32,7 @@
 |  ├── app.ts                   mounts /health, /api/*, /mcp/*, SPA    |
 |  ├── env.ts                   zod-parsed env (DATABASE_URL,          |
 |  │                            JWT_SECRET, EMBED_PROVIDER, ...)       |
-|  ├── auth/                    argon2id, jose JWT, requireAuth        |
+|  ├── auth/                    GitHub OAuth, jose JWT, requireAuth    |
 |  ├── routes/                  health, auth, repos, ingest, sessions, |
 |  │                            search, mcp, static (SPA fallback)    |
 |  ├── lib/                     search-internal (RRF), sessions-internal,|
@@ -176,7 +176,7 @@ Claude Code → /mcp/:token (Streamable HTTP)
 Tables (`packages/server/src/db/schema.ts`, migration `0001_init.sql`):
 
 ```
-users (id uuid pk, email unique, password_hash, role)
+users (id uuid pk, email unique nullable, github_id, github_login, avatar_url, role)
   └─ user_repos (user_id, repo_id, access)  ──┐
                                               │ many-to-many
 repos (id uuid pk, canonical_url unique) ─────┘

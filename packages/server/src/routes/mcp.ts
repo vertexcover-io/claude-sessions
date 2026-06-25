@@ -22,13 +22,13 @@ const buildMcpServer = (db: DbClient, userId: string): McpServer => {
 
   server.tool(
     "search_sessions",
-    "Hybrid FTS + vector search across this user's accessible sessions.",
+    "Hybrid FTS + vector search across all (non-private) sessions in the org.",
     {
       query: z.string(),
       limit: z.number().int().min(1).max(50).optional(),
     },
     async ({ query, limit }) => {
-      const result = await searchInternal(db, userId, query, {
+      const result = await searchInternal(db, query, {
         limit: limit ?? 10,
       });
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
@@ -63,7 +63,7 @@ const buildMcpServer = (db: DbClient, userId: string): McpServer => {
 
   server.tool(
     "get_my_recent_sessions",
-    "List the user's most recent sessions, optionally filtered.",
+    "List the most recent (non-private) sessions across the org, optionally filtered.",
     {
       limit: z.number().int().min(1).max(50).optional(),
       agent: z.string().optional(),
@@ -86,7 +86,7 @@ const buildMcpServer = (db: DbClient, userId: string): McpServer => {
       since_days: z.number().int().min(1).max(365).optional(),
     },
     async ({ since_days }) => {
-      const filters = [eq(sessions.userId, userId)];
+      const filters = [eq(sessions.isPrivate, false)];
       if (since_days !== undefined) {
         const since = new Date();
         since.setDate(since.getDate() - since_days);

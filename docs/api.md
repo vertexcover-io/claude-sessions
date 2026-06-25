@@ -6,9 +6,11 @@ The server is a single Hono app (`packages/server/src/app.ts`) exposing REST rou
 
 | Audience | Used by | How to obtain |
 |---|---|---|
-| `cli` | `claude-sessions` CLI (bearer header) | `POST /api/auth/login` returns `{ token }` |
-| `web` | Browser SPA (httpOnly cookie `session`) | Same `POST /api/auth/login` sets the cookie |
+| `web` | Browser SPA (httpOnly cookie `session`) | GitHub OAuth web flow (`GET /api/auth/github/start` → `…/callback`) sets the cookie |
+| `cli` | `claude-sessions` CLI (bearer header) | Browser pairing flow: `POST /api/auth/cli-code` → `POST /api/auth/cli-exchange` returns `{ token }` |
 | `mcp` | Claude Code MCP client (URL path token) | `POST /api/auth/mcp-token` (must be authenticated) |
+
+Sign-in is **GitHub OAuth, gated to one organization** (`GITHUB_ORG`). There is no password login.
 
 `requireAuth` (`packages/server/src/auth/middleware.ts`) reads the `Authorization: Bearer ...` header OR the `session` cookie, verifies the JWT, and exposes `c.get("user")` as `{ id, email, role }`. The MCP route requires `aud === "mcp"`; everything else accepts `cli` or `web`.
 
@@ -18,21 +20,19 @@ Errors are `401 { error: "unauthorized" }` for missing/invalid tokens.
 
 ## REST
 
-### `POST /api/auth/login`
+### `GET /api/auth/github/start`
 
-Public.
+Public. Mints a CSRF `state`, sets a short-lived httpOnly `oauth_state` cookie, and `302`-redirects to GitHub's authorize endpoint with `scope=read:org user:email`. Returns `500` if `GITHUB_CLIENT_ID` is unset.
 
-Request:
+### `GET /api/auth/github/callback`
 
-```json
-{ "email": "you@example.com", "password": "..." }
-```
+Public (GitHub redirects here with `?code&state`). Verifies `state` against the cookie, exchanges the code, checks the user is an `active` member of `GITHUB_ORG`, upserts the user, and sets the `session` cookie (`aud: web`).
 
-Responses:
+- `302 → /` on success (cookie set)
+- `302 → /login?error=not_member` if not an org member (no user row, no cookie)
+- `302 → /login?error=state` on CSRF/state mismatch
 
-- `200 { token, user: { id, email, role } }` — bearer token in body (`aud: cli`); cookie set (`aud: web`, httpOnly, sameSite=Lax, 7d)
-- `400 { error }` — invalid request shape
-- `401 { error: "invalid email or password" }`
+The CLI obtains its bearer token via the pairing flow once the web session exists: `POST /api/auth/cli-code` (auth required) → `POST /api/auth/cli-exchange { code }` → `{ token, user }`.
 
 ### `GET /api/auth/me`
 

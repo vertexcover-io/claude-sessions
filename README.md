@@ -66,7 +66,15 @@ Required env vars:
 | `PORT` | `3000` | |
 | `WEB_DIST` | `packages/web/dist` | Static SPA served from this directory at `/` |
 
-There is no public registration endpoint. Seed a user directly with the helper in `packages/server/tests/helpers/seed.ts` or insert one with SQL — the password column is argon2id-hashed (`packages/server/src/auth/argon.ts`).
+Sign-in is **GitHub OAuth, gated to one organization**. Only members of `GITHUB_ORG` (default `vertexcover-io`) can log in; a user row is auto-created on first login. There is no password login. OAuth env vars:
+
+| Var | Default | Notes |
+|---|---|---|
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | — | From the GitHub OAuth app; required for sign-in |
+| `GITHUB_ORG` | `vertexcover-io` | Only `active` members may sign in |
+| `APP_BASE_URL` | request origin | Builds the OAuth `redirect_uri` (`<APP_BASE_URL>/api/auth/github/callback`) |
+
+All authenticated members can read every (non-private) session; writes (rename, summary, privacy) remain owner-only.
 
 ## Quickstart — web
 
@@ -115,10 +123,7 @@ claude-sessions enable .
 
 ```sh
 bun run --filter @claude-sessions/cli build
-node packages/cli/dist/main.js login \
-  --server http://localhost:3000 \
-  --email you@example.com \
-  --password '...'
+node packages/cli/dist/main.js login --server http://localhost:3000
 node packages/cli/dist/main.js enable .
 node packages/cli/dist/main.js watch
 ```
@@ -129,7 +134,7 @@ Token + per-repo state live under `~/.claude-sessions/` (override with `CLAUDE_S
 
 | Command | What it does |
 |---|---|
-| `login --server <url> --email <e> --password <p>` | Authenticate, persist token to `~/.claude-sessions/credentials.json` (mode 0600) |
+| `login --server <url>` | Open the browser to sign in with GitHub, then paste the pairing code; persists the token to `~/.claude-sessions/credentials.json` (mode 0600) |
 | `enable [path]` | Register a repo (cwd by default), upsert it on the server, backfill existing JSONL |
 | `disable [path] [--purge]` | Stop syncing this repo locally; `--purge` deletes its events from the server |
 | `status` | Print a table of enabled repos and their last-sync timestamps |
@@ -146,7 +151,9 @@ Token + per-repo state live under `~/.claude-sessions/` (override with `CLAUDE_S
 
 REST (all `/api/*` routes require cookie or bearer auth):
 
-- `POST /api/auth/login` — issues bearer (audience `cli`) and `session` cookie (audience `web`)
+- `GET  /api/auth/github/start` — begin the org-gated GitHub OAuth web flow
+- `GET  /api/auth/github/callback` — exchange code, gate on org membership, set the `session` cookie (audience `web`)
+- `POST /api/auth/cli-code` / `POST /api/auth/cli-exchange` — browser pairing-code flow for the CLI (audience `cli`)
 - `GET  /api/auth/me`
 - `POST /api/auth/logout`
 - `POST /api/auth/mcp-token` — exchange auth for an MCP-scoped JWT
@@ -154,7 +161,7 @@ REST (all `/api/*` routes require cookie or bearer auth):
 - `GET  /api/repos/:canonical/sessions` — session list per repo
 - `POST /api/repos/enable` / `POST /api/repos/disable`
 - `POST /api/ingest` — batch upload session + events (CLI watcher target)
-- `GET  /api/sessions` — recent feed across all enabled repos
+- `GET  /api/sessions` — recent feed across all members' (non-private) sessions; `?user=<github_login>` filters by author
 - `GET  /api/sessions/:id` — metadata + summary + display_name resolution
 - `GET  /api/sessions/:id/events` — chronological event stream
 - `POST /api/sessions/:id/summary` — store summary; embedding is generated inline
@@ -173,7 +180,7 @@ Full details: [`docs/api.md`](docs/api.md).
 - **Runtime**: Bun for install/scripts, Node 22 for the long-running server
 - **Server**: Hono, `@hono/node-server`, Drizzle ORM, `postgres`
 - **DB**: Postgres 16 with `pgvector` extension (HNSW cosine), Postgres FTS via `to_tsvector`
-- **Auth**: argon2id (`@node-rs/argon2`), JWT via `jose` (audiences: `cli`, `web`, `mcp`)
+- **Auth**: GitHub OAuth (org-gated), JWT via `jose` (audiences: `cli`, `web`, `mcp`)
 - **MCP**: `@modelcontextprotocol/sdk` Streamable HTTP transport
 - **CLI**: `commander`, `chokidar`, `proper-lockfile`, `undici` (tests)
 - **Web**: React 18, Vite 6, TanStack Query/Virtual, Tailwind v4, Shiki for code, react-markdown + remark-gfm

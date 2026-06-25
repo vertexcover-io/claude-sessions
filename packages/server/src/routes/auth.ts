@@ -3,23 +3,28 @@
 import { randomBytes } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { deleteCookie, setCookie } from "hono/cookie";
+import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { z } from "zod";
-import { verifyPassword } from "../auth/argon.js";
+import { type GithubClient, createGithubClient } from "../auth/github.js";
 import { signToken } from "../auth/jwt.js";
 import { type AuthVariables, buildRequireAuth } from "../auth/middleware.js";
 import type { DbClient } from "../db/client.js";
 import { users } from "../db/schema.js";
+import { upsertGithubUser } from "../db/users.js";
 import type { Env } from "../env.js";
-
-const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
-});
 
 const exchangeSchema = z.object({
   code: z.string().min(8).max(32),
 });
+
+// GitHub may not expose an email; synthesize a stable non-null value so the
+// JWT `email` claim (and every consumer of it) stays a plain string.
+const emailForToken = (email: string | null, login: string): string =>
+  email ?? `${login}@users.noreply.github.com`;
+
+// Only allow same-origin relative paths as the post-login redirect target.
+const safeReturnPath = (raw: string | undefined): string =>
+  raw?.startsWith("/") && !raw.startsWith("//") ? raw : "/";
 
 interface PairEntry {
   userId: string;
@@ -48,48 +53,104 @@ const generatePairCode = (): string => {
   return `${out.slice(0, 4)}-${out.slice(4)}`;
 };
 
-export const buildAuthRouter = (db: DbClient, env: Env): Hono<{ Variables: AuthVariables }> => {
+export const buildAuthRouter = (
+  db: DbClient,
+  env: Env,
+  githubClient: GithubClient = createGithubClient(env),
+): Hono<{ Variables: AuthVariables }> => {
   const router = new Hono<{ Variables: AuthVariables }>();
   const requireAuth = buildRequireAuth(env);
+  const cookieSecure = env.COOKIE_SECURE ?? env.NODE_ENV === "production";
 
-  router.post("/login", async (c) => {
-    const json = await c.req.json().catch(() => null);
-    const parsed = loginSchema.safeParse(json);
-    if (!parsed.success) return c.json({ error: "invalid email or password" }, 400);
+  const redirectUri = (c: { req: { url: string } }): string => {
+    const base = env.APP_BASE_URL ?? new URL(c.req.url).origin;
+    return `${base.replace(/\/+$/, "")}/api/auth/github/callback`;
+  };
 
-    const { email, password } = parsed.data;
-    const found = await db.select().from(users).where(eq(users.email, email)).limit(1);
-    const user = found[0];
-    if (!user) return c.json({ error: "invalid email or password" }, 401);
-
-    const ok = await verifyPassword(password, user.passwordHash);
-    if (!ok) return c.json({ error: "invalid email or password" }, 401);
-
-    const role = user.role === "admin" ? "admin" : "user";
-    const cookieToken = await signToken(
-      { sub: user.id, email: user.email, role, aud: "web" },
-      env.JWT_SECRET,
-    );
-    const bearerToken = await signToken(
-      { sub: user.id, email: user.email, role, aud: "cli" },
-      env.JWT_SECRET,
-    );
-    setCookie(c, "session", cookieToken, {
+  // GET /api/auth/github/start — kick off the OAuth web flow. We stash a random
+  // `state` (plus the optional return path) in a short-lived httpOnly cookie and
+  // verify it on callback (CSRF protection).
+  router.get("/github/start", (c) => {
+    if (!env.GITHUB_CLIENT_ID) {
+      return c.json({ error: "github oauth not configured" }, 500);
+    }
+    const nonce = randomBytes(16).toString("hex");
+    const from = safeReturnPath(c.req.query("from"));
+    const state = `${nonce}.${Buffer.from(from).toString("base64url")}`;
+    setCookie(c, "oauth_state", state, {
       httpOnly: true,
-      secure: env.COOKIE_SECURE ?? env.NODE_ENV === "production",
+      secure: cookieSecure,
       sameSite: "Lax",
       path: "/",
-      maxAge: 60 * 60 * 24 * 7,
+      maxAge: 600,
     });
-    return c.json({
-      token: bearerToken,
-      user: { id: user.id, email: user.email, role },
-    });
+    const url = new URL("https://github.com/login/oauth/authorize");
+    url.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
+    url.searchParams.set("redirect_uri", redirectUri(c));
+    url.searchParams.set("scope", "read:org user:email");
+    url.searchParams.set("state", state);
+    return c.redirect(url.toString());
   });
 
-  router.get("/me", requireAuth, (c) => {
+  // GET /api/auth/github/callback — exchange the code, gate on org membership,
+  // upsert the user, and set the web session cookie.
+  router.get("/github/callback", async (c) => {
+    const code = c.req.query("code");
+    const state = c.req.query("state");
+    const cookieState = getCookie(c, "oauth_state");
+    deleteCookie(c, "oauth_state", { path: "/" });
+
+    if (!code || !state || !cookieState || state !== cookieState) {
+      return c.redirect("/login?error=state");
+    }
+    const from = safeReturnPath(
+      Buffer.from(state.split(".")[1] ?? "", "base64url").toString("utf8"),
+    );
+
+    try {
+      const { accessToken } = await githubClient.exchangeCode(code, redirectUri(c));
+      const isMember = await githubClient.isOrgMember(accessToken, env.GITHUB_ORG);
+      if (!isMember) return c.redirect("/login?error=not_member");
+
+      const profile = await githubClient.getProfile(accessToken);
+      if (!profile.email) {
+        profile.email = await githubClient.getPrimaryEmail(accessToken);
+      }
+
+      const user = await upsertGithubUser(db, profile);
+      const role = user.role === "admin" ? "admin" : "user";
+      const cookieToken = await signToken(
+        { sub: user.id, email: emailForToken(user.email, profile.login), role, aud: "web" },
+        env.JWT_SECRET,
+      );
+      setCookie(c, "session", cookieToken, {
+        httpOnly: true,
+        secure: cookieSecure,
+        sameSite: "Lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 7,
+      });
+      return c.redirect(from);
+    } catch (err) {
+      console.error("github oauth callback failed", err);
+      return c.redirect("/login?error=oauth");
+    }
+  });
+
+  router.get("/me", requireAuth, async (c) => {
     const user = c.get("user");
-    return c.json({ user });
+    const rows = await db
+      .select({ githubLogin: users.githubLogin, avatarUrl: users.avatarUrl })
+      .from(users)
+      .where(eq(users.id, user.id))
+      .limit(1);
+    return c.json({
+      user: {
+        ...user,
+        github_login: rows[0]?.githubLogin ?? null,
+        avatar_url: rows[0]?.avatarUrl ?? null,
+      },
+    });
   });
 
   router.post("/logout", (c) => {

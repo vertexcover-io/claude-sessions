@@ -262,26 +262,22 @@ If you see `Error: extension "vector" not available`, make sure
 `postgresql-16-pgvector` was installed and the extension was created in the
 database.
 
-### 10. Seed a user
+### 10. Configure GitHub OAuth
 
-There is no public registration endpoint. Create the first user via a Node
-script:
+There is no password login or registration endpoint — users sign in with GitHub
+and a row is auto-created on first login for members of the allowed org. Create a
+GitHub OAuth app (Settings → Developer settings → OAuth Apps):
+
+- **Authorization callback URL**: `https://<your-host>/api/auth/github/callback`
+- Scopes requested at runtime: `read:org user:email`
+
+Then set in `.env`:
 
 ```sh
-cd ~/claude-sessions
-export $(cat .env | xargs)
-
-node -e "
-import postgres from 'postgres';
-import { hashPassword } from './packages/server/dist/src/auth/argon.js';
-const sql = postgres(process.env.DATABASE_URL);
-const email = 'you@example.com';
-const password = 'your-password';
-const hash = await hashPassword(password);
-await sql\`INSERT INTO users (email, password_hash, role) VALUES (\${email}, \${hash}, 'user')\`;
-console.log('user created:', email);
-await sql.end();
-"
+GITHUB_CLIENT_ID=<oauth app client id>
+GITHUB_CLIENT_SECRET=<oauth app client secret>
+GITHUB_ORG=vertexcover-io          # only active members of this org can sign in
+APP_BASE_URL=https://<your-host>   # builds the OAuth redirect_uri
 ```
 
 ### 11. Start the server
@@ -322,17 +318,15 @@ ssh exe.dev share port claude-sessions 3000
 curl https://claude-sessions.exe.xyz/health
 # → {"status":"ok"}
 
-# Test login
-curl -X POST https://claude-sessions.exe.xyz/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"you@example.com","password":"your-password"}'
-# → {"token":"eyJ...","user":{"id":"...","email":"you@example.com","role":"user"}}
+# OAuth start should 302-redirect to github.com
+curl -sI "https://claude-sessions.exe.xyz/api/auth/github/start" | grep -i location
+# → location: https://github.com/login/oauth/authorize?...
 ```
 
 ### 14. Open the web UI
 
-Open `https://claude-sessions.exe.xyz` in your browser. Log in with the
-seeded credentials.
+Open `https://claude-sessions.exe.xyz` in your browser and click
+**Sign in with GitHub** (you must be a member of `GITHUB_ORG`).
 
 If you get a blank page or 404, the SPA static files may not be served.
 Check that `WEB_DIST` is set or the files exist at the expected path:
@@ -362,15 +356,6 @@ node packages/cli/dist/main.js login --server https://claude-sessions.exe.xyz
 This opens the web UI. Log in there, then copy the pairing code from the UI
 and paste it into the terminal. The CLI persists the token to
 `~/.claude-sessions/credentials.json` (mode `0600`).
-
-### Login via credentials (alternative)
-
-```sh
-node packages/cli/dist/main.js login \
-  --server https://claude-sessions.exe.xyz \
-  --email you@example.com \
-  --password 'your-password'
-```
 
 ### Enable a repo and start watching
 
@@ -434,7 +419,7 @@ middleware with an in-memory token bucket:
 
 | Endpoint | Strategy | Suggested limit |
 |---|---|---|
-| `POST /api/auth/login` | IP-based | 10 req/min |
+| `GET /api/auth/github/callback` | IP-based | 10 req/min |
 | `POST /api/auth/cli-exchange` | IP-based | 5 req/min |
 | `POST /api/ingest` | User-based | 100 req/min |
 

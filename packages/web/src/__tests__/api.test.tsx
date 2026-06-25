@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, apiFetch, useEnabledRepos, useLogin, useRecentSessions } from "../lib/api";
+import { ApiError, apiFetch, useEnabledRepos, useRecentSessions } from "../lib/api";
 
 interface FetchCall {
   url: string;
@@ -62,20 +62,6 @@ describe("apiFetch", () => {
   it("throws ApiError with status on non-2xx", async () => {
     globalThis.fetch = mockFetch(() => jsonResponse(401, { error: "unauthorized" }));
     await expect(apiFetch("/api/me")).rejects.toBeInstanceOf(ApiError);
-  });
-});
-
-describe("useLogin", () => {
-  it("POSTs /api/auth/login with the credentials body", async () => {
-    globalThis.fetch = mockFetch(() =>
-      jsonResponse(200, { token: "tok", user: { id: "u-1", email: "a@b", role: "user" } }),
-    );
-    const qc = new QueryClient();
-    const { result } = renderHook(() => useLogin(), { wrapper: wrap(qc) });
-    await result.current.mutateAsync({ email: "a@b", password: "x" });
-    expect(captured[0]?.url).toBe("/api/auth/login");
-    expect(captured[0]?.init.method).toBe("POST");
-    expect(captured[0]?.init.body).toBe(JSON.stringify({ email: "a@b", password: "x" }));
   });
 });
 

@@ -1,13 +1,13 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
 import { canonicalizeRepo } from "@claude-sessions/core";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { z } from "zod";
 import { type AuthVariables, buildRequireAuth } from "../auth/middleware.js";
 import type { DbClient } from "../db/client.js";
 import { findUserRepoAccess, grantUserRepo, revokeUserRepo, upsertRepo } from "../db/repos.js";
-import { repos, sessions, summaries, userRepos } from "../db/schema.js";
+import { repos, sessions, summaries, userRepos, users } from "../db/schema.js";
 import type { Env } from "../env.js";
 
 const enableSchema = z.object({
@@ -25,8 +25,10 @@ export const buildReposRouter = (db: DbClient, env: Env): Hono<{ Variables: Auth
   router.use("*", buildRequireAuth(env));
 
   /**
-   * GET /api/repos — list every enabled repo for the calling user with
-   * a session count and last-activity timestamp. Drives the Home grid.
+   * GET /api/repos — list every repo that has at least one (non-private)
+   * session, org-wide, with a global session count and last-activity. Drives
+   * the Home grid. `access` reflects the caller's own grant if any (else
+   * "read"), but visibility is global.
    */
   router.get("/", async (c) => {
     const user = c.get("user");
@@ -35,16 +37,15 @@ export const buildReposRouter = (db: DbClient, env: Env): Hono<{ Variables: Auth
         id: repos.id,
         canonicalUrl: repos.canonicalUrl,
         displayName: repos.displayName,
-        access: userRepos.access,
+        access: sql<string>`coalesce(${userRepos.access}, 'read')`,
         sessionCount: sql<number>`coalesce(count(${sessions.id})::int, 0)`,
         // postgres-js returns aggregate timestamps as ISO strings (not Date),
         // even when the column type is timestamptz. Coerce to ISO at the edge.
         lastActivity: sql<string | null>`max(${sessions.startedAt})`,
       })
-      .from(userRepos)
-      .innerJoin(repos, eq(repos.id, userRepos.repoId))
-      .leftJoin(sessions, and(eq(sessions.repoId, repos.id), eq(sessions.userId, user.id)))
-      .where(eq(userRepos.userId, user.id))
+      .from(repos)
+      .innerJoin(sessions, and(eq(sessions.repoId, repos.id), eq(sessions.isPrivate, false)))
+      .leftJoin(userRepos, and(eq(userRepos.repoId, repos.id), eq(userRepos.userId, user.id)))
       .groupBy(repos.id, userRepos.access)
       .orderBy(desc(sql`max(${sessions.startedAt})`));
 
@@ -65,9 +66,12 @@ export const buildReposRouter = (db: DbClient, env: Env): Hono<{ Variables: Auth
    * newest first. `:canonical` is URL-encoded canonical_url.
    */
   router.get("/:canonical/sessions", async (c) => {
-    const user = c.get("user");
     const canonical = decodeURIComponent(c.req.param("canonical"));
     const limit = Math.min(Math.max(Number(c.req.query("limit") ?? 50), 1), 200);
+    // Repeated query params (?user=a&user=b) accumulate into OR-sets, so each
+    // filter narrows to "any of the selected values".
+    const userFilters = c.req.queries("user") ?? [];
+    const branchFilters = c.req.queries("branch") ?? [];
 
     const repoRow = await db
       .select({ id: repos.id })
@@ -76,8 +80,14 @@ export const buildReposRouter = (db: DbClient, env: Env): Hono<{ Variables: Auth
       .limit(1);
     if (!repoRow[0]) return c.json({ repo: null, sessions: [] }, 404);
 
-    const access = await findUserRepoAccess(db, user.id, repoRow[0].id);
-    if (!access) return c.json({ error: "forbidden" }, 403);
+    const filters = [eq(sessions.repoId, repoRow[0].id), eq(sessions.isPrivate, false)];
+    if (userFilters.length > 0) {
+      const lowered = userFilters.map((u) => u.toLowerCase());
+      filters.push(inArray(sql`lower(${users.githubLogin})`, lowered));
+    }
+    if (branchFilters.length > 0) {
+      filters.push(inArray(sessions.branch, branchFilters));
+    }
 
     const rows = await db
       .select({
@@ -94,10 +104,13 @@ export const buildReposRouter = (db: DbClient, env: Env): Hono<{ Variables: Auth
         summary: summaries.summary,
         tags: summaries.tags,
         prsReferenced: summaries.prsReferenced,
+        authorLogin: users.githubLogin,
+        authorAvatar: users.avatarUrl,
       })
       .from(sessions)
       .leftJoin(summaries, eq(summaries.sessionId, sessions.id))
-      .where(and(eq(sessions.userId, user.id), eq(sessions.repoId, repoRow[0].id)))
+      .leftJoin(users, eq(users.id, sessions.userId))
+      .where(and(...filters))
       .orderBy(desc(sessions.startedAt))
       .limit(limit);
 
@@ -117,8 +130,61 @@ export const buildReposRouter = (db: DbClient, env: Env): Hono<{ Variables: Auth
         summary: r.summary ?? null,
         tags: r.tags ?? [],
         prs_referenced: r.prsReferenced ?? [],
+        author: r.authorLogin ? { github_login: r.authorLogin, avatar_url: r.authorAvatar } : null,
         display_name: r.name ?? r.title ?? `Session ${r.id.slice(0, 8)}`,
       })),
+    });
+  });
+
+  /**
+   * GET /api/repos/:canonical/facets — distinct branches and session authors
+   * scoped to THIS repo's non-private sessions. Powers the repo-view filter
+   * bar so its dropdowns only list values that actually occur in the project
+   * (e.g. the user menu shows only members who pushed ≥1 session here).
+   */
+  router.get("/:canonical/facets", async (c) => {
+    const canonical = decodeURIComponent(c.req.param("canonical"));
+
+    const repoRow = await db
+      .select({ id: repos.id })
+      .from(repos)
+      .where(eq(repos.canonicalUrl, canonical))
+      .limit(1);
+    if (!repoRow[0]) return c.json({ branches: [], users: [] }, 404);
+
+    const scoped = and(eq(sessions.repoId, repoRow[0].id), eq(sessions.isPrivate, false));
+
+    const branchRows = await db
+      .select({ branch: sessions.branch })
+      .from(sessions)
+      .where(and(scoped, isNotNull(sessions.branch)))
+      .groupBy(sessions.branch)
+      .orderBy(sessions.branch);
+
+    const userRows = await db
+      .select({
+        github_login: users.githubLogin,
+        avatar_url: users.avatarUrl,
+        count: sql<number>`count(${sessions.id})::int`,
+      })
+      .from(sessions)
+      .innerJoin(users, eq(users.id, sessions.userId))
+      .where(and(scoped, isNotNull(users.githubLogin)))
+      .groupBy(users.githubLogin, users.avatarUrl)
+      .orderBy(desc(sql`count(${sessions.id})`));
+
+    return c.json({
+      branches: branchRows.map((r) => r.branch).filter((b): b is string => b !== null),
+      users: userRows
+        .filter(
+          (r): r is { github_login: string; avatar_url: string | null; count: number } =>
+            r.github_login !== null,
+        )
+        .map((r) => ({
+          github_login: r.github_login,
+          avatar_url: r.avatar_url,
+          count: r.count,
+        })),
     });
   });
 

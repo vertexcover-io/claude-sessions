@@ -1,14 +1,18 @@
 // AI-generated. See PROMPT.md for the prompts and model used.
 
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { CliPairCard } from "../components/CliPairCard";
+import { HomeFilters } from "../components/HomeFilters";
 import { RepoTile } from "../components/RepoTile";
 import { SessionCard } from "../components/SessionCard";
 import { useEnabledRepos, useRecentSessions } from "../lib/api";
 
 export const HomePage = () => {
+  const [repoFilters, setRepoFilters] = useState<string[]>([]);
+  const [userFilters, setUserFilters] = useState<string[]>([]);
   const repos = useEnabledRepos();
-  const recent = useRecentSessions({ limit: 10 });
+  const recent = useRecentSessions({ limit: 10, repos: repoFilters, users: userFilters });
 
   return (
     <div className="max-w-5xl mx-auto p-4 space-y-8" data-testid="home-page">
@@ -39,6 +43,13 @@ export const HomePage = () => {
           </div>
         )}
       </section>
+
+      <HomeFilters
+        repos={repoFilters}
+        users={userFilters}
+        onReposChange={setRepoFilters}
+        onUsersChange={setUserFilters}
+      />
 
       <section>
         <h2 className="text-lg font-semibold mb-3">Recent sessions</h2>

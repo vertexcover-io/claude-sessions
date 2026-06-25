@@ -19,22 +19,20 @@ The Claude Code transcripts directory is `~/.claude/projects/` by default (overr
 
 ### `login`
 
-Authenticate against a server and persist the bearer token.
+Authenticate against a server and persist the bearer token. Opens the browser
+to sign in with **GitHub** (org-gated), then prompts for the 8-char pairing code
+shown by the web app.
 
 ```sh
-claude-sessions login \
-  --server http://localhost:3000 \
-  --email you@example.com \
-  --password '...'
+claude-sessions login --server http://localhost:3000
 ```
 
 | Flag | Required | Default | Notes |
 |---|---|---|---|
 | `--server <url>` | yes | `http://localhost:3000` | Trailing slashes stripped |
-| `--email <email>` | yes | — | |
-| `--password <password>` | yes | — | Sent only over the login POST |
 
-Writes `credentials.json` with mode `0600` (REQ-030, REQ-031). On failure: stderr `invalid email or password`, exit 1.
+Writes `credentials.json` with mode `0600`. Sign-in happens in the browser via
+GitHub OAuth; the CLI never sees a password.
 
 Implementation: `packages/cli/src/commands/login.ts`.
 

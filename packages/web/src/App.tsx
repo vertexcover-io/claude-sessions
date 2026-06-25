@@ -27,7 +27,18 @@ const TopBar = () => {
         >
           <Search size={14} /> Search
         </Link>
-        <span className="text-xs text-muted-foreground">{user.email}</span>
+        <span className="text-xs text-muted-foreground inline-flex items-center gap-1.5">
+          {user.avatar_url && (
+            <img
+              src={user.avatar_url}
+              alt=""
+              className="w-5 h-5 rounded-full"
+              width={20}
+              height={20}
+            />
+          )}
+          {user.github_login ?? user.email}
+        </span>
         <button
           type="button"
           onClick={async () => {

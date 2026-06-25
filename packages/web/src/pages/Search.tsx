@@ -3,11 +3,12 @@
 import { Search } from "lucide-react";
 import { type FormEvent, useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { AuthorChip } from "../components/AuthorChip";
 import { SearchFilters } from "../components/SearchFilters";
 import { useSearch } from "../lib/api";
 import { formatCost, formatRepo } from "../lib/cn";
 
-const FILTER_KEYS = ["repo", "branch", "agent", "model", "tag", "has_pr", "since"] as const;
+const FILTER_KEYS = ["repo", "branch", "agent", "model", "tag", "user", "has_pr", "since"] as const;
 
 const formatDate = (iso: string): string => {
   const ms = Date.parse(iso);
@@ -44,6 +45,7 @@ export const SearchPage = () => {
           agent: params.get("agent") ?? undefined,
           model: params.get("model") ?? undefined,
           tag: params.get("tag") ?? undefined,
+          user: params.get("user") ?? undefined,
           since: params.get("since") ?? undefined,
           has_pr:
             params.get("has_pr") === "true"
@@ -130,6 +132,7 @@ export const SearchPage = () => {
               <span>{formatRepo(r.repo)}</span>
               {r.branch && <span className="font-mono">{r.branch}</span>}
               {r.agent && <span className="font-mono">{r.agent}</span>}
+              {r.author && <AuthorChip author={r.author} />}
               {r.started_at && (
                 <span className="font-mono ml-auto">{formatDate(r.started_at)}</span>
               )}
