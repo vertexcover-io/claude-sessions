@@ -164,3 +164,5 @@ printf '  3. Check it:\n'
 printf '       %sclaude-sessions status%s\n' "$DIM" "$RESET"
 printf '\n%sNote:%s the CLI does not run the server. Start one separately\n' "$YELLOW" "$RESET"
 printf '       (see README "Quickstart — server") or point --server at a deployment.\n'
+printf '%sNote:%s the watcher auto-starts (and revives if it died) whenever Claude\n' "$YELLOW" "$RESET"
+printf '       Code launches, via the installed SessionStart hook — no boot step needed.\n'

@@ -3,6 +3,7 @@
 import { existsSync } from "node:fs";
 import { readSessionSync } from "@claude-sessions/adapter-claude";
 import type { CanonicalSession } from "@claude-sessions/core";
+import { type SettingsFile, readSettings } from "../config/settings.js";
 import { readWatermark } from "../summarizer/index.js";
 import { detectSignals, renderSignalAnchors } from "../summarizer/signals.js";
 import type { UploadClient } from "../upload/client.js";
@@ -51,6 +52,8 @@ export interface StopHookOptions {
   readSession?: (path: string) => CanonicalSession;
   /** Inject the watermark probe (tests). */
   readWatermarkImpl?: typeof readWatermark;
+  /** Inject persistent settings (tests). Defaults to `readSettings()`. */
+  readSettingsImpl?: () => SettingsFile;
 }
 
 interface StopHookInput {
@@ -59,15 +62,17 @@ interface StopHookInput {
   stop_hook_active?: boolean;
 }
 
-const SUMMARY_REASON =
+const SUMMARY_REASON_BASE =
   "Before stopping, author a concise summary of this session as JSON and push it so the work " +
   "is captured: run `claude-sessions summarize --current --from-agent` with the summary on stdin " +
   "(the claude-session skill documents the schema). Authoring it yourself keeps the summary " +
-  "agent-written instead of falling back to a separate `claude -p` pass. If this session had " +
-  "failure episodes (a user correction, a tool/test failure, a reopened task, a revert), include " +
-  "a `learnings` array: one evidence-anchored record per episode, each citing ≥1 event_uuid, with " +
-  "descriptive `what_went_wrong` / `what_would_have_prevented` prose, a `root_cause`, " +
-  "`attributed_to`, and `confidence`. Use `[]` when the session was clean.";
+  "agent-written instead of falling back to a separate `claude -p` pass.";
+
+const SUMMARY_REASON_LEARNINGS =
+  " If this session had failure episodes (a user correction, a tool/test failure, a reopened " +
+  "task, a revert), include a `learnings` array: one evidence-anchored record per episode, each " +
+  "citing ≥1 event_uuid, with descriptive `what_went_wrong` / `what_would_have_prevented` prose, " +
+  "a `root_cause`, `attributed_to`, and `confidence`. Use `[]` when the session was clean.";
 
 const readStdin = async (stdin: NodeJS.ReadableStream): Promise<string> => {
   const chunks: Buffer[] = [];
@@ -91,6 +96,11 @@ export const stopHookCommand = async (opts: StopHookOptions): Promise<number> =>
 
   // Loop guard: we already blocked once this stop cycle — let it stop now.
   if (input.stop_hook_active) return 0;
+
+  // Summary disabled by the user — never nag. The watcher still tails/uploads
+  // events; only the automatic summary authoring trigger is suppressed.
+  const settings = (opts.readSettingsImpl ?? readSettings)();
+  if (!settings.summary_enabled) return 0;
 
   const sessionId = input.session_id;
   const transcriptPath = input.transcript_path;
@@ -122,12 +132,17 @@ export const stopHookCommand = async (opts: StopHookOptions): Promise<number> =>
 
   // Stage-1 signal detection: hand the agent deterministic evidence anchors
   // (computed over the full JSONL) so long sessions stay diagnosable. Fail
-  // open — a detector hiccup must never wedge the session shut.
-  let reason = SUMMARY_REASON;
-  try {
-    reason += renderSignalAnchors(detectSignals(session));
-  } catch {
-    // ignore — keep the base reason.
+  // open — a detector hiccup must never wedge the session shut. Skipped
+  // entirely when learnings are disabled (no per-turn signal compute, and the
+  // agent is not asked for a `learnings` array).
+  let reason = SUMMARY_REASON_BASE;
+  if (settings.learnings_enabled) {
+    reason += SUMMARY_REASON_LEARNINGS;
+    try {
+      reason += renderSignalAnchors(detectSignals(session));
+    } catch {
+      // ignore — keep the base reason.
+    }
   }
 
   stdout.write(`${JSON.stringify({ decision: "block", reason })}\n`);

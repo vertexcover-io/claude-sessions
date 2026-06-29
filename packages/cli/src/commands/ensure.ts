@@ -17,6 +17,10 @@ export interface EnsureOptions {
   cliEntry?: string;
   /** Skip starting the daemon (tests). */
   skipDaemon?: boolean;
+  /** Inject the watcher-liveness probe (tests). Defaults to `isWatcherAlive`. */
+  isWatcherAliveImpl?: () => boolean;
+  /** Inject the daemon starter (tests). Defaults to `startWatcherDaemon`. */
+  startWatcherDaemonImpl?: typeof startWatcherDaemon;
   fetchImpl?: typeof fetch;
   stdout?: NodeJS.WritableStream;
   stderr?: NodeJS.WritableStream;
@@ -73,10 +77,13 @@ export const ensureCommand = async (opts: EnsureOptions = {}): Promise<number> =
     return 0;
   }
 
-  // 2. Watcher daemon (detached singleton; returns instantly).
-  if (!opts.skipDaemon && !isWatcherAlive()) {
+  // 2. Watcher daemon (detached singleton; returns instantly). This is the
+  // autostart path: every Claude Code launch revives the watcher if it died.
+  const watcherAlive = opts.isWatcherAliveImpl ?? isWatcherAlive;
+  const startDaemon = opts.startWatcherDaemonImpl ?? startWatcherDaemon;
+  if (!opts.skipDaemon && !watcherAlive()) {
     try {
-      const pid = startWatcherDaemon({ cliEntry: opts.cliEntry ?? resolveCliEntry() });
+      const pid = startDaemon({ cliEntry: opts.cliEntry ?? resolveCliEntry() });
       stderr.write(`claude-sessions: started watcher (pid ${pid}). logs: ${watchLogPath()}\n`);
     } catch (err) {
       stderr.write(

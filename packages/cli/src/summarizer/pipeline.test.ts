@@ -170,6 +170,90 @@ describe("summarizeAndUpload pipeline (e2e with mocked claude)", () => {
     expect((runReqs[0]?.body as { claude_model: string }).claude_model).toBe("agent");
   });
 
+  const agentEventsFor = (id: string) => [
+    {
+      type: "user",
+      uuid: "u1",
+      parentUuid: null,
+      timestamp: "2026-05-09T10:00:00.000Z",
+      sessionId: id,
+      cwd: "/tmp/work",
+      version: "1.0.0",
+      message: { role: "user", content: "do work" },
+    },
+  ];
+
+  const sampleLearning = {
+    title: "Forgot to run tests",
+    episode_event_uuids: ["u1"],
+    what_went_wrong: "Claimed done without running the suite.",
+    what_would_have_prevented: "Run the tests before declaring done.",
+    root_cause: "missing_verification" as const,
+    attributed_to: "agent" as const,
+    confidence: 0.8,
+  };
+
+  it("omits the learnings field on the upload when learnings are disabled", async () => {
+    const path = join(dir, "session-learn-off.jsonl");
+    writeFileSync(
+      path,
+      `${agentEventsFor("session-learn-off")
+        .map((e) => JSON.stringify(e))
+        .join("\n")}\n`,
+    );
+
+    const client = new UploadClient({ serverUrl: server.url, token: "tok" });
+    await summarizeAndUpload("session-learn-off", {
+      upload: client,
+      jsonlPath: path,
+      learningsEnabled: false,
+      providedSummary: {
+        title: "T",
+        summary: "S.",
+        tags: ["x"],
+        files_touched: [],
+        prs_referenced: [],
+        learnings: [sampleLearning],
+      },
+      runClaudeImpl: () => Promise.reject(new Error("claude must not run")),
+      minePrsImpl: () => Promise.resolve([]),
+    });
+
+    const summaryReq = server.requests.find((r) => r.path.endsWith("/summary"));
+    expect(summaryReq?.body).not.toHaveProperty("learnings");
+  });
+
+  it("includes the learnings field when learnings are enabled", async () => {
+    const path = join(dir, "session-learn-on.jsonl");
+    writeFileSync(
+      path,
+      `${agentEventsFor("session-learn-on")
+        .map((e) => JSON.stringify(e))
+        .join("\n")}\n`,
+    );
+
+    const client = new UploadClient({ serverUrl: server.url, token: "tok" });
+    await summarizeAndUpload("session-learn-on", {
+      upload: client,
+      jsonlPath: path,
+      learningsEnabled: true,
+      providedSummary: {
+        title: "T",
+        summary: "S.",
+        tags: ["x"],
+        files_touched: [],
+        prs_referenced: [],
+        learnings: [sampleLearning],
+      },
+      runClaudeImpl: () => Promise.reject(new Error("claude must not run")),
+      minePrsImpl: () => Promise.resolve([]),
+    });
+
+    const summaryReq = server.requests.find((r) => r.path.endsWith("/summary"));
+    expect(summaryReq?.body).toHaveProperty("learnings");
+    expect((summaryReq?.body as { learnings: unknown[] }).learnings).toHaveLength(1);
+  });
+
   it("provisional: stamps the agent summary model=heuristic", async () => {
     const path = join(dir, "session-prov-1.jsonl");
     const events = [

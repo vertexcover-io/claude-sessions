@@ -9,6 +9,7 @@ import type {
   SessionLearning,
   SessionSummary,
 } from "@claude-sessions/core";
+import { readSettings } from "../config/settings.js";
 import type { SummarizationRunPayload, UploadClient } from "../upload/client.js";
 import type { ClaudeRunMeta } from "./claude-runner.js";
 import { runClaude } from "./claude-runner.js";
@@ -38,6 +39,12 @@ export interface PipelineDeps {
    * always supersedes it. Implies `providedSummary`.
    */
   provisional?: boolean;
+  /**
+   * Whether to include the `learnings` field on the upload. Defaults to the
+   * persisted `learnings_enabled` setting. When false, the field is omitted
+   * (not `[]`) so existing server-side learnings are preserved.
+   */
+  learningsEnabled?: boolean;
 }
 
 export interface LlmSummary {
@@ -206,6 +213,7 @@ export const summarizeAndUpload = async (
   const minePrsFn = deps.minePrsImpl ?? minePrs;
   const readBlobFn = deps.readBlob ?? (async (p: string) => new Uint8Array(await readFile(p)));
   const isAgent = deps.providedSummary !== undefined;
+  const learningsEnabled = deps.learningsEnabled ?? readSettings().learnings_enabled;
   const model = deps.model ?? (deps.provisional ? "heuristic" : isAgent ? "agent" : "sonnet");
   const attempt = deps.attempt ?? 1;
   const log = deps.recordLogger ?? ((m) => process.stderr.write(`${m}\n`));
@@ -293,7 +301,7 @@ export const summarizeAndUpload = async (
     model,
     status: "ok",
     summarized_event_count: session.events.length,
-    ...(llm.learnings !== undefined ? { learnings: llm.learnings } : {}),
+    ...(learningsEnabled && llm.learnings !== undefined ? { learnings: llm.learnings } : {}),
   };
 
   await deps.upload.uploadSummary(sessionId, summary);

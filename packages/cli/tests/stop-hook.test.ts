@@ -7,8 +7,16 @@ import { Readable } from "node:stream";
 import type { CanonicalSession } from "@claude-sessions/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stopHookCommand } from "../src/commands/stop-hook.js";
+import type { SettingsFile } from "../src/config/settings.js";
 import type { WatermarkState } from "../src/summarizer/index.js";
 import type { UploadClient } from "../src/upload/client.js";
+
+const settings = (over: Partial<SettingsFile> = {}): SettingsFile => ({
+  version: 1,
+  summary_enabled: true,
+  learnings_enabled: false,
+  ...over,
+});
 
 let dir: string;
 let transcript: string;
@@ -52,6 +60,7 @@ const run = async (
     stdin: Readable.from([raw]),
     stdout: out.stream,
     readSession: () => fakeSession(50),
+    readSettingsImpl: () => settings(),
     readWatermarkImpl: async (): Promise<WatermarkState> => ({
       summary: { status: "ok" } as WatermarkState["summary"],
       fresh: false,
@@ -152,6 +161,36 @@ describe("stopHookCommand", () => {
     expect(isBlock(out)).toBe(false);
   });
 
+  it("allows the stop without nagging when summary is disabled", async () => {
+    const { code, out } = await run(
+      { session_id: "sess-1", transcript_path: transcript, stop_hook_active: false },
+      { readSettingsImpl: () => settings({ summary_enabled: false }) },
+    );
+    expect(code).toBe(0);
+    expect(isBlock(out)).toBe(false);
+    expect(out.trim()).toBe("");
+  });
+
+  it("omits the learnings clause and anchors when learnings are disabled", async () => {
+    const { out } = await run(
+      { session_id: "sess-1", transcript_path: transcript, stop_hook_active: false },
+      { readSettingsImpl: () => settings({ learnings_enabled: false }) },
+    );
+    expect(isBlock(out)).toBe(true);
+    expect(out).toContain("summarize --current --from-agent");
+    expect(out).not.toContain("learnings");
+    expect(out).not.toContain("event_uuid");
+  });
+
+  it("includes the learnings clause when learnings are enabled", async () => {
+    const { out } = await run(
+      { session_id: "sess-1", transcript_path: transcript, stop_hook_active: false },
+      { readSettingsImpl: () => settings({ learnings_enabled: true }) },
+    );
+    expect(isBlock(out)).toBe(true);
+    expect(out).toContain("learnings");
+  });
+
   it("does not re-nag when only the summarize round-trip's own events were added", async () => {
     // Regression: the in-loop agent just authored a summary at event count 50.
     // Running `summarize`, its tool_result, the closing assistant message and the
@@ -182,6 +221,7 @@ describe("stopHookCommand", () => {
       ]),
       stdout: out.stream,
       readSession: () => fakeSession(summarizedAt + roundTripFootprint),
+      readSettingsImpl: () => settings(),
     });
     expect(code).toBe(0);
     expect(isBlock(out.get())).toBe(false);
