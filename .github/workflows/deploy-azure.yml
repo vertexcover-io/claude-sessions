@@ -1,0 +1,146 @@
+name: Deploy to Azure
+
+# Manual-only. The exe.dev workflow (.github/workflows/deploy.yml) remains the
+# auto-deploy on push to main; this is a parallel path triggered by hand from the
+# Actions tab until Azure is promoted to primary. No `push` trigger by design.
+on:
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: "Pulumi stack to deploy"
+        required: true
+        default: "prod"
+
+concurrency:
+  group: deploy-azure-${{ github.event.inputs.stack }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # for azure/login OIDC
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      STACK: ${{ github.event.inputs.stack }}
+      IMAGE_NAME: claude-sessions
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.19
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Same quality gates as the exe.dev path — reuses the root scripts unchanged.
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Lint
+        run: bun run lint
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # Install the infra program's deps (standalone project, not a workspace member).
+      - name: Install infra deps
+        working-directory: infra
+        run: bun install --frozen-lockfile
+
+      # Read the ACR login server from the existing stack so we can tag/push the
+      # image before `pulumi up` rolls the Container App to it. The registry is
+      # created on the first manual `pulumi up` (see infra/README.md bootstrap).
+      - name: Resolve ACR login server from stack
+        id: acr
+        working-directory: infra
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          bunx pulumi stack select "$STACK"
+          LOGIN_SERVER="$(bunx pulumi stack output acrLoginServer)"
+          ACR_NAME="$(bunx pulumi stack output acrName)"
+          echo "login_server=$LOGIN_SERVER" >> "$GITHUB_OUTPUT"
+          echo "acr_name=$ACR_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: ACR login
+        run: az acr login --name "${{ steps.acr.outputs.acr_name }}"
+
+      - name: Build and push image
+        env:
+          LOGIN_SERVER: ${{ steps.acr.outputs.login_server }}
+        run: |
+          set -euo pipefail
+          TAG="${LOGIN_SERVER}/${IMAGE_NAME}:${GITHUB_SHA}"
+          LATEST="${LOGIN_SERVER}/${IMAGE_NAME}:latest"
+          docker build -t "$TAG" -t "$LATEST" .
+          docker push "$TAG"
+          docker push "$LATEST"
+          echo "IMAGE_REF=$TAG" >> "$GITHUB_ENV"
+
+      # Roll the Container App to the freshly pushed image. Pulumi performs a
+      # zero-downtime revision swap. Migrations run on container startup
+      # (packages/server/src/main.ts runs them unless NODE_ENV=test), so a
+      # healthy new revision implies migrations applied.
+      - name: Pulumi up
+        uses: pulumi/actions@v5
+        with:
+          command: up
+          stack-name: ${{ env.STACK }}
+          work-dir: infra
+          # Pin the image to this commit's digest for an auditable, reproducible
+          # rollout (and easy rollback by re-running pinned to an older SHA).
+          config-map: |
+            { "claude-sessions:image": { "value": "${{ env.IMAGE_REF }}", "secret": false } }
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+
+      - name: Read app URL
+        id: url
+        working-directory: infra
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          URL="$(bunx pulumi stack output containerAppUrl)"
+          echo "app_url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Health probe
+        env:
+          APP_URL: ${{ steps.url.outputs.app_url }}
+        run: |
+          set -euo pipefail
+          echo "Probing ${APP_URL}/api/health"
+          for i in $(seq 1 40); do
+            if curl -fsS --max-time 5 "${APP_URL}/api/health" | tee /tmp/health.out | grep -q '"ok"'; then
+              echo "Health OK after ${i} attempts."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Health check failed. Last response:"
+          cat /tmp/health.out 2>/dev/null || true
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Azure deploy ${GITHUB_SHA::7}"
+            echo ""
+            echo "- Status: ${{ job.status }}"
+            echo "- Stack: \`${STACK}\`"
+            echo "- Image: \`${IMAGE_REF:-n/a}\`"
+            echo "- URL: ${{ steps.url.outputs.app_url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
