@@ -63,10 +63,12 @@ interface StopHookInput {
 }
 
 const SUMMARY_REASON_BASE =
-  "Before stopping, author a concise summary of this session as JSON and push it so the work " +
-  "is captured: run `claude-sessions summarize --current --from-agent` with the summary on stdin " +
-  "(the claude-session skill documents the schema). Authoring it yourself keeps the summary " +
-  "agent-written instead of falling back to a separate `claude -p` pass.";
+  "Author a summary of this session and push it before stopping. Run " +
+  "`claude-sessions summarize --current --from-agent` and pipe a JSON object on stdin with these " +
+  'keys: {"title": "<short, ≤80 chars>", "summary": "<2-4 sentences on what was done>", ' +
+  '"tags": ["<2-5 kebab-case topics>"], "files_touched": ["<repo-relative paths you changed>"], ' +
+  '"prs_referenced": ["<PR URLs or numbers, or []>"]}. See the claude-session skill for the full ' +
+  "schema.";
 
 const SUMMARY_REASON_LEARNINGS =
   " If this session had failure episodes (a user correction, a tool/test failure, a reopened " +
