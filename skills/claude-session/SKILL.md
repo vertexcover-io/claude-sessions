@@ -49,10 +49,12 @@ Do these in order the first time; afterwards only the step you need.
    The JSON contract and field guidance are in `references/summaries.md`. The
    CLI merges deterministic facts (files touched, tool counts) on top of your
    narrative. You do NOT need to know the session id — `--current` resolves it.
-   A `Stop` hook prompts you to do this before a substantive session ends. If
-   the session had failure episodes, include an evidence-anchored `learnings`
-   array in the same JSON (see `references/summaries.md`); read them back with
-   `claude-sessions learnings <session-id>`.
+   A `Stop` hook prompts you to do this before a substantive session ends.
+   **Learnings are opt-in** (off by default): only when the `Stop` hook's
+   reason explicitly asks for a `learnings` array — i.e. `learnings.enabled` is
+   on — should you include one (evidence-anchored; see `references/summaries.md`).
+   When it isn't asked for, omit the field entirely; the CLI strips it anyway.
+   Read learnings back with `claude-sessions learnings <session-id>`.
 6. **Push artifacts** — `claude-sessions artifacts <session-id>` uploads the
    **Markdown files** the agent created/edited so they show in the web Artifacts
    tab. See `references/artifacts.md` for what counts as an artifact and how.
@@ -81,6 +83,7 @@ Full per-command flag reference: `references/commands.md`.
 - "Publish the Markdown docs this session produced" → `artifacts`.
 - "Find an old session" → `find <query>` (opens the dashboard search).
 - "Resume an old session locally" → `fork <session-id> --until <event-uuid>`.
+- "Turn off the summary nag / turn learnings on or off" → `config set summary.enabled <bool>` / `config set learnings.enabled <bool>` (see `references/commands.md`).
 
 `sync` uploads raw events; summarizing is a separate step. When **you** author
 the summary (`--from-agent`) it costs nothing extra; the manual `claude -p`
