@@ -187,6 +187,42 @@ describe("POST /api/sessions/:id/summary", () => {
     expect(res.status).toBe(404);
   });
 
+  it("auto-creates a stub session for a provisional (heuristic) summary that races ahead of ingest", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "summ-provisional@example.test",
+      repoUrl: "github.com/example/summary-provisional",
+    });
+    const sessionId = "session-provisional-race";
+    const body = buildSummaryBody(sessionId);
+    body.model = "heuristic";
+
+    const res = await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    expect(res.status).toBe(200);
+
+    const sessRows = await db.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(sessRows).toHaveLength(1);
+    expect(sessRows[0]?.userId).toBe(seed.user.id);
+    expect(sessRows[0]?.repoId).toBeNull();
+
+    const getRes = await get(`/api/sessions/${sessionId}`, seed.token);
+    expect(getRes.status).toBe(200);
+    const json = (await getRes.json()) as { summary: { title: string } | null };
+    expect(json.summary?.title).toBe("Phase 4 summarizer wiring");
+  });
+
+  it("still 404s for a non-provisional summary that races ahead of ingest", async () => {
+    const seed = await seedUser(db.db, env.JWT_SECRET, {
+      email: "summ-nonprovisional@example.test",
+      repoUrl: "github.com/example/summary-nonprovisional",
+    });
+    const sessionId = "session-nonprovisional-race";
+    const body = buildSummaryBody(sessionId);
+    body.model = "agent";
+
+    const res = await post(`/api/sessions/${sessionId}/summary`, seed.token, body);
+    expect(res.status).toBe(404);
+  });
+
   it("REQ-007/REQ-014: round-trips summarized_event_count via POST and GET /:id", async () => {
     const seed = await seedUser(db.db, env.JWT_SECRET, {
       email: "summ-watermark@example.test",

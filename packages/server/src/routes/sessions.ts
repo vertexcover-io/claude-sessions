@@ -422,7 +422,32 @@ export const buildSessionsRouter = (db: DbClient, env: Env): Hono<{ Variables: A
       .from(sessions)
       .where(and(eq(sessions.id, sessionId), eq(sessions.userId, user.id)))
       .limit(1);
-    if (!sessRows[0]) return c.json({ error: "session not found" }, 404);
+    if (!sessRows[0]) {
+      // The provisional-title flow races ingest: the UserPromptSubmit hook can
+      // prompt the agent to push a heuristic title before the watcher has
+      // ingested any event (which is what creates the session row). For that
+      // case only, seed a minimal stub keyed to the authenticated user so the
+      // title lands; ingest's onConflictDoUpdate overwrites every placeholder
+      // (repoId, agent, timestamps) on the first real event. A non-provisional
+      // summary without a row is still a genuine error → keep the 404.
+      if (body.model !== "heuristic") {
+        return c.json({ error: "session not found" }, 404);
+      }
+      const seededAt = new Date(body.generated_at);
+      await db
+        .insert(sessions)
+        .values({
+          id: sessionId,
+          userId: user.id,
+          repoId: null,
+          agent: "claude-code",
+          agentVersion: "unknown",
+          sourceCwdHint: "",
+          startedAt: seededAt,
+          endedAt: seededAt,
+        })
+        .onConflictDoNothing({ target: sessions.id });
+    }
 
     const safeTitle = ensureString(redactDeep(body.title));
     const safeSummary = ensureString(redactDeep(body.summary));
