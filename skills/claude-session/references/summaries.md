@@ -35,7 +35,12 @@ All five fields are required (use empty arrays where you have nothing):
 A malformed payload (not JSON, or missing/empty `title`/`summary`) fails with a
 non-zero exit and uploads nothing.
 
-## Learnings (optional)
+## Learnings (optional, off by default)
+
+Learnings are gated by the `learnings.enabled` setting (default `false`; toggle
+with `claude-sessions config set learnings.enabled true`). When disabled, the
+Stop hook does not ask for them and the CLI strips any `learnings` field from the
+upload — so only include this array when the Stop hook's reason explicitly asks.
 
 If the session had failure episodes, add a `learnings` array to the same JSON.
 Each record is one diagnosed episode. **Evidence-anchored**: every learning MUST

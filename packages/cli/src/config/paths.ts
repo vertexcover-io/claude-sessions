@@ -16,3 +16,4 @@ export const configHome = (): string =>
 export const credentialsPath = (): string => join(configHome(), "credentials.json");
 export const statePath = (): string => join(configHome(), "state.json");
 export const reposPath = (): string => join(configHome(), "repos.json");
+export const settingsPath = (): string => join(configHome(), "settings.json");

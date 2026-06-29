@@ -4,6 +4,7 @@
 import { Command } from "commander";
 import { buildClient } from "./commands/_client.js";
 import { artifactsCommand } from "./commands/artifacts.js";
+import { configCommand } from "./commands/config.js";
 import { disableCommand } from "./commands/disable.js";
 import { enableCommand } from "./commands/enable.js";
 import { ensureCommand } from "./commands/ensure.js";
@@ -113,6 +114,17 @@ const main = async (): Promise<void> => {
     .action(() => {
       const r = statusCommand();
       process.exit(r.exit);
+    });
+
+  program
+    .command("config [args...]")
+    .description(
+      "Read or toggle persistent settings: config set <key> <value> | get <key> | list. " +
+        "Keys: summary.enabled, learnings.enabled.",
+    )
+    .action(async (args: string[]) => {
+      const code = await configCommand(args ?? []);
+      process.exit(code);
     });
 
   program

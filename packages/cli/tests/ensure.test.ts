@@ -100,6 +100,42 @@ describe("ensure command", () => {
     }
   });
 
+  it("dead watcher → starts the daemon (autostart on SessionStart)", async () => {
+    await writeCredentials({ server_url: SERVER, token: "tok", user_email: "u@e.test" });
+    let started = 0;
+    const code = await ensureCommand({
+      serverUrl: SERVER,
+      stdout,
+      stderr,
+      fetchImpl: okFetch,
+      isWatcherAliveImpl: () => false,
+      startWatcherDaemonImpl: () => {
+        started += 1;
+        return 4242;
+      },
+    });
+    expect(code).toBe(0);
+    expect(started).toBe(1);
+  });
+
+  it("live watcher → does not start a second daemon", async () => {
+    await writeCredentials({ server_url: SERVER, token: "tok", user_email: "u@e.test" });
+    let started = 0;
+    const code = await ensureCommand({
+      serverUrl: SERVER,
+      stdout,
+      stderr,
+      fetchImpl: okFetch,
+      isWatcherAliveImpl: () => true,
+      startWatcherDaemonImpl: () => {
+        started += 1;
+        return 1;
+      },
+    });
+    expect(code).toBe(0);
+    expect(started).toBe(0);
+  });
+
   it("authenticated + repo enabled → additionalContext nudges to push a summary", async () => {
     await writeCredentials({ server_url: SERVER, token: "tok", user_email: "u@e.test" });
     const repo = makeTempGitRepo("git@github.com:fixture/ensure-b.git");

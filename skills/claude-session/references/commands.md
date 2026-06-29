@@ -27,6 +27,22 @@ normally don't run it by hand.
 Add/remove the global `SessionStart` hook (`claude-sessions ensure`) in
 `~/.claude/settings.json`. Idempotent; preserves your other settings.
 
+## Settings
+
+### `config set <key> <value>` / `config get <key>` / `config list`
+Read or toggle persistent settings in `~/.claude-sessions/settings.json`.
+Keys (values are `true`/`false`):
+- `summary.enabled` (default `true`) — when `false`, the `Stop` hook no longer
+  nags you to author an end-of-session summary. The watcher still tails/uploads
+  events, and manual `summarize` / provisional first-prompt titles still work.
+- `learnings.enabled` (default `false`) — when `false` (the default), no
+  per-turn learnings are computed or sent: the `Stop` hook omits the learnings
+  ask and signal anchors, and `summarize` strips the `learnings` field from the
+  upload (existing server-side learnings are preserved). Set to `true` to
+  re-enable evidence-anchored learnings.
+
+`config list` prints both current values.
+
 ## Repos
 
 ### `enable [path]`
