@@ -1,146 +1,80 @@
-name: Deploy to Azure
+name: Deploy claude-sessions
 
-# Manual-only. The exe.dev workflow (.github/workflows/deploy.yml) remains the
-# auto-deploy on push to main; this is a parallel path triggered by hand from the
-# Actions tab until Azure is promoted to primary. No `push` trigger by design.
+# Build the claude-sessions image, push it to refrens' private ACR, and roll the
+# Azure App Service to it. Modeled on the Serana "Delivery pipeline" but simplified:
+# direct-to-production (no staging-slot swap) and triggered directly on push to
+# master / manual dispatch instead of GitHub `deployment` events.
+#
+# Runs in refrens/horizon (the refrens-owned mirror of this source). All AZURE_*_PROD
+# secrets/vars are provisioned by Pulumi (refrens/azure) once this repo is in the
+# `repositories` list:
+#   AZURE_ACR_USERNAME_PROD / AZURE_ACR_PASSWORD_PROD  (registry.ts)
+#   AZURE_CREDENTIALS_PROD / AZURE_RESOURCE_GROUP_PROD (rg.ts)
+#   AZURE_CLAUDESESSIONS_SERVICE_NAME_PROD             (AppService index.ts:375)
+
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
-    inputs:
-      stack:
-        description: "Pulumi stack to deploy"
-        required: true
-        default: "prod"
 
 concurrency:
-  group: deploy-azure-${{ github.event.inputs.stack }}
-  cancel-in-progress: false
+  group: deploy-claude-sessions-prod
+  cancel-in-progress: true
 
-permissions:
-  id-token: write # for azure/login OIDC
-  contents: read
+run-name: Deploy claude-sessions (prod) ${{ github.sha }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    environment:
+      name: prod
     env:
-      STACK: ${{ github.event.inputs.stack }}
-      IMAGE_NAME: claude-sessions
+      AZURE_ACR_USERNAME: ${{ vars.AZURE_ACR_USERNAME_PROD }}
+      AZURE_ACR_PASSWORD: ${{ secrets.AZURE_ACR_PASSWORD_PROD }}
+      AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS_PROD }}
+      AZURE_RESOURCE_GROUP: ${{ vars.AZURE_RESOURCE_GROUP_PROD }}
+      AZURE_SERVICE_NAME: ${{ vars.AZURE_CLAUDESESSIONS_SERVICE_NAME_PROD }}
+      ACR_REPOSITORY: claudesessions
 
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+      - name: Log in to ACR
+        uses: docker/login-action@v3
         with:
-          bun-version: 1.2.19
+          registry: ${{ env.AZURE_ACR_USERNAME }}.azurecr.io
+          username: ${{ env.AZURE_ACR_USERNAME }}
+          password: ${{ env.AZURE_ACR_PASSWORD }}
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - name: Set Docker tags
+        id: set-tags
+        env:
+          ACR_REGISTRY: ${{ env.AZURE_ACR_USERNAME }}.azurecr.io
+        run: |
+          set -euo pipefail
+          R="$ACR_REGISTRY/$ACR_REPOSITORY"
+          echo "tags=${R}:latest,${R}:prod,${R}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-      # Same quality gates as the exe.dev path — reuses the root scripts unchanged.
-      - name: Typecheck
-        run: bun run typecheck
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.set-tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Lint
-        run: bun run lint
-
-      - name: Azure login
+      - name: Login to Azure
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          creds: ${{ env.AZURE_CREDENTIALS }}
 
-      # Install the infra program's deps (standalone project, not a workspace member).
-      - name: Install infra deps
-        working-directory: infra
-        run: bun install --frozen-lockfile
-
-      # Read the ACR login server from the existing stack so we can tag/push the
-      # image before `pulumi up` rolls the Container App to it. The registry is
-      # created on the first manual `pulumi up` (see infra/README.md bootstrap).
-      - name: Resolve ACR login server from stack
-        id: acr
-        working-directory: infra
-        env:
-          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+      # Direct-to-production: the App Service is pinned to <acr>/claudesessions:latest,
+      # so a restart forces a pull of the freshly pushed image. No staging-slot swap.
+      - name: Restart App Service (pull new :latest)
         run: |
-          set -euo pipefail
-          bunx pulumi stack select "$STACK"
-          LOGIN_SERVER="$(bunx pulumi stack output acrLoginServer)"
-          ACR_NAME="$(bunx pulumi stack output acrName)"
-          echo "login_server=$LOGIN_SERVER" >> "$GITHUB_OUTPUT"
-          echo "acr_name=$ACR_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: ACR login
-        run: az acr login --name "${{ steps.acr.outputs.acr_name }}"
-
-      - name: Build and push image
-        env:
-          LOGIN_SERVER: ${{ steps.acr.outputs.login_server }}
-        run: |
-          set -euo pipefail
-          TAG="${LOGIN_SERVER}/${IMAGE_NAME}:${GITHUB_SHA}"
-          LATEST="${LOGIN_SERVER}/${IMAGE_NAME}:latest"
-          docker build -t "$TAG" -t "$LATEST" .
-          docker push "$TAG"
-          docker push "$LATEST"
-          echo "IMAGE_REF=$TAG" >> "$GITHUB_ENV"
-
-      # Roll the Container App to the freshly pushed image. Pulumi performs a
-      # zero-downtime revision swap. Migrations run on container startup
-      # (packages/server/src/main.ts runs them unless NODE_ENV=test), so a
-      # healthy new revision implies migrations applied.
-      - name: Pulumi up
-        uses: pulumi/actions@v5
-        with:
-          command: up
-          stack-name: ${{ env.STACK }}
-          work-dir: infra
-          # Pin the image to this commit's digest for an auditable, reproducible
-          # rollout (and easy rollback by re-running pinned to an older SHA).
-          config-map: |
-            { "claude-sessions:image": { "value": "${{ env.IMAGE_REF }}", "secret": false } }
-        env:
-          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
-
-      - name: Read app URL
-        id: url
-        working-directory: infra
-        env:
-          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
-        run: |
-          set -euo pipefail
-          URL="$(bunx pulumi stack output containerAppUrl)"
-          echo "app_url=$URL" >> "$GITHUB_OUTPUT"
-
-      - name: Health probe
-        env:
-          APP_URL: ${{ steps.url.outputs.app_url }}
-        run: |
-          set -euo pipefail
-          echo "Probing ${APP_URL}/api/health"
-          for i in $(seq 1 40); do
-            if curl -fsS --max-time 5 "${APP_URL}/api/health" | tee /tmp/health.out | grep -q '"ok"'; then
-              echo "Health OK after ${i} attempts."
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Health check failed. Last response:"
-          cat /tmp/health.out 2>/dev/null || true
-          exit 1
-
-      - name: Summary
-        if: always()
-        run: |
-          {
-            echo "### Azure deploy ${GITHUB_SHA::7}"
-            echo ""
-            echo "- Status: ${{ job.status }}"
-            echo "- Stack: \`${STACK}\`"
-            echo "- Image: \`${IMAGE_REF:-n/a}\`"
-            echo "- URL: ${{ steps.url.outputs.app_url }}"
-          } >> "$GITHUB_STEP_SUMMARY"
+          az webapp restart \
+            -n "${{ env.AZURE_SERVICE_NAME }}" \
+            -g "${{ env.AZURE_RESOURCE_GROUP }}"
