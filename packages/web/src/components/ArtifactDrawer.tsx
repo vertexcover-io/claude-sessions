@@ -96,7 +96,7 @@ export const ArtifactDrawer = ({ open, onClose, sessionId, artifact }: Props) =>
             )}
             {content.data &&
               (isMarkdown ? (
-                <MarkdownView>{body}</MarkdownView>
+                <MarkdownView renderGraphs>{body}</MarkdownView>
               ) : (
                 <pre
                   className="whitespace-pre-wrap rounded border border-border bg-background p-3 font-mono text-xs"
