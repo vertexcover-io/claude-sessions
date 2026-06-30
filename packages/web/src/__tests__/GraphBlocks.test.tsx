@@ -20,9 +20,19 @@ vi.mock("mermaid", () => ({
 
 import { GraphvizBlock } from "../components/transcript/GraphvizBlock";
 import { MermaidBlock } from "../components/transcript/MermaidBlock";
+import { toFittedSvg } from "../components/transcript/graph-svg";
 
 afterEach(() => {
   vi.clearAllMocks();
+});
+
+describe("toFittedSvg", () => {
+  it("strips fixed width/height from the root svg so it scales to width", () => {
+    const out = toFittedSvg('<svg width="800pt" height="600pt" viewBox="0 0 800 600"><g/></svg>');
+    expect(out).not.toMatch(/<svg[^>]*\swidth=/);
+    expect(out).not.toMatch(/<svg[^>]*\sheight=/);
+    expect(out).toContain('viewBox="0 0 800 600"');
+  });
 });
 
 describe("GraphvizBlock", () => {
