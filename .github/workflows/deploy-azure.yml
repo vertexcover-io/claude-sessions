@@ -58,6 +58,15 @@ jobs:
           username: ${{ env.AZURE_ACR_USERNAME }}
           password: ${{ env.AZURE_ACR_PASSWORD }}
 
+      # The default `docker` driver can't export build cache; the GHA cache
+      # backend (cache-to: type=gha) needs the docker-container driver. Install
+      # it as the default builder so build-push-action uses it.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          install: true
+
       - name: Set Docker tags
         id: set-tags
         env:
