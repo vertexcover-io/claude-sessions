@@ -12,10 +12,13 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@hpcc-js/wasm-graphviz": "^1.22.2",
     "@shikijs/rehype": "^1.24.0",
     "@tanstack/react-query": "^5.62.7",
     "@tanstack/react-virtual": "^3.10.9",
+    "dompurify": "^3.4.11",
     "lucide-react": "^0.469.0",
+    "mermaid": "^11.16.0",
     "re-resizable": "^6.11.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
