@@ -8,7 +8,8 @@ import { settingsPath } from "./paths.js";
  *
  * - `summary_enabled` gates the automatic end-of-session summary nag (the Stop
  *   hook). Provisional first-prompt titles and manual `summarize` are
- *   unaffected. Default on.
+ *   unaffected. Default OFF — no end-of-session summary nag until the user opts
+ *   in.
  * - `learnings_enabled` gates per-turn learnings: signal detection in the Stop
  *   hook and the `learnings` field on the summary upload. Default OFF — no
  *   learnings are computed or sent until the user opts in.
@@ -23,7 +24,7 @@ export type SettingKey = "summary_enabled" | "learnings_enabled";
 
 const defaults = (): SettingsFile => ({
   version: 1,
-  summary_enabled: true,
+  summary_enabled: false,
   learnings_enabled: false,
 });
 

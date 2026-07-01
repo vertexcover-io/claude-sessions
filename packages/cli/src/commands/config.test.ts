@@ -43,7 +43,7 @@ describe("configCommand", () => {
   it("lists defaults", async () => {
     const { code, out } = await run(["list"]);
     expect(code).toBe(0);
-    expect(out).toContain("summary.enabled=true");
+    expect(out).toContain("summary.enabled=false");
     expect(out).toContain("learnings.enabled=false");
   });
 

@@ -25,7 +25,7 @@ describe("settings", () => {
   it("returns defaults when the file is missing", () => {
     expect(readSettings()).toEqual({
       version: 1,
-      summary_enabled: true,
+      summary_enabled: false,
       learnings_enabled: false,
     });
   });
@@ -49,14 +49,14 @@ describe("settings", () => {
     writeFileSync(settingsPath(), "not json {{{");
     expect(readSettings()).toEqual({
       version: 1,
-      summary_enabled: true,
+      summary_enabled: false,
       learnings_enabled: false,
     });
   });
 
   it("falls back to defaults on a wrong-version file", () => {
-    writeFileSync(settingsPath(), JSON.stringify({ version: 2, summary_enabled: false }));
-    expect(readSettings().summary_enabled).toBe(true);
+    writeFileSync(settingsPath(), JSON.stringify({ version: 2, summary_enabled: true }));
+    expect(readSettings().summary_enabled).toBe(false);
   });
 
   it("fills missing keys from defaults", () => {
