@@ -35,6 +35,10 @@ export const MermaidBlock = ({ source }: Props) => {
           startOnLoad: false,
           securityLevel: "strict",
           theme: prefersDark() ? "dark" : "default",
+          // Emit pure-SVG <text> labels instead of HTML <foreignObject>, which
+          // our SVG-profile DOMPurify pass strips (leaving textless diagrams).
+          htmlLabels: false,
+          flowchart: { htmlLabels: false },
         });
         // parse() validates without injecting an error node into the DOM.
         await mermaid.parse(source);
